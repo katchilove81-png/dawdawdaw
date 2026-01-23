@@ -1196,7 +1196,7 @@ end
 
     showQueueLoader()
 
-local KATCHI_LOGO_URL = "https://raw.githubusercontent.com/KatchiHub/Katchi-Huh/refs/heads/main/1767175079960.png"
+local KATCHI_LOGO_URL = "https://raw.githubusercontent.com/katchilove81-png/dawdawdaw/refs/heads/main/1767175079960.png"
 
 local Window = WindUI:CreateWindow({
     Title = "Katchi Hub",
@@ -1353,7 +1353,7 @@ local DiscordCard = DiscordSection:Paragraph({
     Desc  = "🟢 Loading online...\n⚪ " .. TOTAL_MEMBERS .. " Members\nEst. Oct 2025",
 
     -- WindUI supports remote URLs directly (same as their example)
-    Image = "https://raw.githubusercontent.com/KatchiHub/Katchi-Huh/refs/heads/main/ChatGPT%20Image%20Dec%2017%2C%202025%2C%2005_54_46%20PM.png",
+    Image = "https://raw.githubusercontent.com/katchilove81-png/dawdawdaw/refs/heads/main/ChatGPT%20Image%20Dec%2017%2C%202025%2C%2005_54_46%20PM.png",
     ImageSize = 48,
 
     Buttons = {
