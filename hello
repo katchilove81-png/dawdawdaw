@@ -13782,7 +13782,7 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
     end -- End Old Guard scope
 
     -- === COLDSTREAM TEMPORARY SECTION (British) ===
-    local ColdStreamSection = MiscTab:Section({ Title = "Temporary ColdStream (British)", Icon = "flag", Opened = false })
+    local ColdStreamSection = MiscTab:Section({ Title = "Temporary ColdStream", Icon = "flag", Opened = false })
     
     do -- ColdStream scope
         local ChangeClassEvent = game:GetService("ReplicatedStorage").Events.Regiment.ChangeClass
