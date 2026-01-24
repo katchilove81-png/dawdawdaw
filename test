@@ -12961,56 +12961,116 @@ do -- // Configs & Theme Tab
 
 -- ===== KATCHI CUSTOM CONFIG SYSTEM =====
 -- Saves ALL settings including ESP, Player ESP, Kill Aura, etc.
--- Does NOT use external JSON files - uses executor's writefile/readfile
+-- Uses executor's writefile/readfile for JSON storage
 
 local KATCHI_CONFIG_FOLDER = "KatchiHub"
 local KATCHI_CONFIG_PREFIX = "KatchiConfig_"
+local CONFIG_DEBUG = false -- Set to true to enable debug messages
 
--- Simple file wrappers
+local function ConfigDebug(msg)
+    if CONFIG_DEBUG then warn("[CONFIG DEBUG] " .. tostring(msg)) end
+end
+
+-- Simple file wrappers with better error handling
 local function SafeWriteFile(path, content)
     local success = false
-    pcall(function()
-        if writefile then writefile(path, content); success = true end
+    local err = nil
+    
+    -- Try standard writefile
+    local ok1, e1 = pcall(function()
+        if writefile then 
+            writefile(path, content)
+            success = true 
+        end
     end)
+    if not ok1 then err = e1 end
+    
+    -- Try syn.writefile as fallback
     if not success then
-        pcall(function()
-            if syn and syn.writefile then syn.writefile(path, content); success = true end
+        local ok2, e2 = pcall(function()
+            if syn and syn.writefile then 
+                syn.writefile(path, content)
+                success = true 
+            end
         end)
+        if not ok2 then err = e2 end
     end
+    
+    ConfigDebug("SafeWriteFile(" .. path .. "): " .. (success and "OK" or ("FAIL: " .. tostring(err))))
     return success
 end
 
 local function SafeReadFile(path)
     local content = nil
-    pcall(function() if readfile then content = readfile(path) end end)
+    local err = nil
+    
+    local ok1, e1 = pcall(function() 
+        if readfile then content = readfile(path) end 
+    end)
+    if not ok1 then err = e1 end
+    
     if not content then
-        pcall(function() if syn and syn.readfile then content = syn.readfile(path) end end)
+        local ok2, e2 = pcall(function() 
+            if syn and syn.readfile then content = syn.readfile(path) end 
+        end)
+        if not ok2 then err = e2 end
     end
+    
+    ConfigDebug("SafeReadFile(" .. path .. "): " .. (content and ("OK, " .. #content .. " bytes") or ("FAIL: " .. tostring(err))))
     return content
 end
 
 local function SafeListFiles(folder)
     local files = {}
-    pcall(function() if listfiles then files = listfiles(folder) end end)
+    local ok, err = pcall(function() 
+        if listfiles then files = listfiles(folder) end 
+    end)
+    ConfigDebug("SafeListFiles(" .. folder .. "): " .. (ok and (#files .. " files") or ("FAIL: " .. tostring(err))))
     return files
 end
 
 local function SafeDelFile(path)
-    pcall(function() if delfile then delfile(path) end end)
+    local success = false
+    local ok, err = pcall(function() 
+        if delfile then 
+            delfile(path) 
+            success = true
+        end 
+    end)
+    ConfigDebug("SafeDelFile(" .. path .. "): " .. (success and "OK" or ("FAIL: " .. tostring(err))))
+    return success
 end
 
 local function SafeMakeFolder(path)
-    pcall(function() if makefolder then makefolder(path) end end)
+    local ok, err = pcall(function() 
+        if makefolder then makefolder(path) end 
+    end)
+    -- Also try isfolder check first
+    pcall(function()
+        if isfolder and not isfolder(path) then
+            if makefolder then makefolder(path) end
+        end
+    end)
+    ConfigDebug("SafeMakeFolder(" .. path .. "): " .. (ok and "OK" or ("FAIL: " .. tostring(err))))
 end
 
 local function SafeIsFile(path)
     local exists = false
     pcall(function() if isfile then exists = isfile(path) end end)
+    ConfigDebug("SafeIsFile(" .. path .. "): " .. tostring(exists))
+    return exists
+end
+
+local function SafeIsFolderExists(path)
+    local exists = false
+    pcall(function() if isfolder then exists = isfolder(path) end end)
     return exists
 end
 
 -- Ensure folder exists
-SafeMakeFolder(KATCHI_CONFIG_FOLDER)
+if not SafeIsFolderExists(KATCHI_CONFIG_FOLDER) then
+    SafeMakeFolder(KATCHI_CONFIG_FOLDER)
+end
 
 local function GetConfigPath(name)
     return KATCHI_CONFIG_FOLDER .. "/" .. KATCHI_CONFIG_PREFIX .. tostring(name) .. ".json"
@@ -13293,103 +13353,133 @@ local function ApplyAllSettings(settings)
     end
 end
 
--- Save config to file + WindUI ConfigManager
+-- Save config to file
 local function SaveConfig(name)
-    if not name or name == "" then return false, "No name" end
-    name = name:gsub("[^%w%-%_]", "")
-    if name == "" then return false, "Invalid name" end
+    if not name or name == "" then 
+        ConfigDebug("SaveConfig: No name provided")
+        return false, "No name" 
+    end
     
-    -- 1. Save custom settings to JSON file
+    -- Sanitize name
+    name = tostring(name):gsub("[^%w%-%_]", "")
+    if name == "" then 
+        ConfigDebug("SaveConfig: Invalid name after sanitization")
+        return false, "Invalid name" 
+    end
+    
+    ConfigDebug("SaveConfig: Saving '" .. name .. "'")
+    
+    -- Ensure folder exists
+    if not SafeIsFolderExists(KATCHI_CONFIG_FOLDER) then
+        SafeMakeFolder(KATCHI_CONFIG_FOLDER)
+    end
+    
+    -- Collect settings
     local settings = CollectAllSettings()
+    ConfigDebug("SaveConfig: Collected settings")
+    
+    -- Encode to JSON
     local jsonStr = nil
-    pcall(function()
+    local encodeOk, encodeErr = pcall(function()
         jsonStr = game:GetService("HttpService"):JSONEncode(settings)
     end)
     
-    local fileSuccess = false
-    if jsonStr then
-        local path = GetConfigPath(name)
-        fileSuccess = SafeWriteFile(path, jsonStr)
+    if not encodeOk or not jsonStr then
+        ConfigDebug("SaveConfig: JSON encode failed - " .. tostring(encodeErr))
+        return false, "JSON encode failed"
     end
     
-    -- 2. Also save via WindUI ConfigManager (saves flagged UI elements)
-    local windUISuccess = false
-    pcall(function()
-        local ConfigManager = Window and Window.ConfigManager
-        if ConfigManager then
-            local cfg = ConfigManager:CreateConfig(name)
-            if cfg and cfg.Save then
-                cfg:Save()
-                windUISuccess = true
-            end
-        end
-    end)
+    ConfigDebug("SaveConfig: JSON encoded (" .. #jsonStr .. " bytes)")
     
-    if fileSuccess or windUISuccess then
-        return true, fileSuccess and "Saved" or "WindUI only"
+    -- Write file
+    local path = GetConfigPath(name)
+    local fileSuccess = SafeWriteFile(path, jsonStr)
+    
+    if fileSuccess then
+        ConfigDebug("SaveConfig: SUCCESS - saved to " .. path)
+        return true, "Saved"
+    else
+        ConfigDebug("SaveConfig: FAILED to write file")
+        return false, "Failed to write file"
     end
-    return false, "Failed to save"
 end
 
--- Load config from file + WindUI ConfigManager
+-- Load config from file
 local function LoadConfig(name)
-    if not name or name == "" then return false, "No name" end
-    
-    local fileLoaded = false
-    local windUILoaded = false
-    
-    -- 1. Try loading from JSON file (custom settings)
-    local path = GetConfigPath(name)
-    if SafeIsFile(path) then
-        local content = SafeReadFile(path)
-        if content then
-            local settings = nil
-            pcall(function()
-                settings = game:GetService("HttpService"):JSONDecode(content)
-            end)
-            if settings then
-                ApplyAllSettings(settings)
-                fileLoaded = true
-            end
-        end
+    if not name or name == "" then 
+        ConfigDebug("LoadConfig: No name provided")
+        return false, "No name" 
     end
     
-    -- 2. Also load via WindUI ConfigManager (loads flagged UI elements)
-    pcall(function()
-        local ConfigManager = Window and Window.ConfigManager
-        if ConfigManager then
-            local cfg = ConfigManager:CreateConfig(name)
-            if cfg and cfg.Load then
-                cfg:Load()
-                windUILoaded = true
-            end
-        end
+    name = tostring(name)
+    ConfigDebug("LoadConfig: Loading '" .. name .. "'")
+    
+    -- Check if file exists
+    local path = GetConfigPath(name)
+    ConfigDebug("LoadConfig: Checking path " .. path)
+    
+    if not SafeIsFile(path) then
+        ConfigDebug("LoadConfig: File does not exist")
+        return false, "Config not found"
+    end
+    
+    -- Read file
+    local content = SafeReadFile(path)
+    if not content or content == "" then
+        ConfigDebug("LoadConfig: Failed to read file or empty content")
+        return false, "Failed to read file"
+    end
+    
+    ConfigDebug("LoadConfig: Read " .. #content .. " bytes")
+    
+    -- Decode JSON
+    local settings = nil
+    local decodeOk, decodeErr = pcall(function()
+        settings = game:GetService("HttpService"):JSONDecode(content)
     end)
     
-    if fileLoaded or windUILoaded then
-        return true, fileLoaded and "Loaded" or "WindUI only"
+    if not decodeOk or not settings then
+        ConfigDebug("LoadConfig: JSON decode failed - " .. tostring(decodeErr))
+        return false, "JSON decode failed"
     end
-    return false, "Config not found"
+    
+    ConfigDebug("LoadConfig: JSON decoded, applying settings...")
+    
+    -- Apply settings
+    local applyOk, applyErr = pcall(function()
+        ApplyAllSettings(settings)
+    end)
+    
+    if not applyOk then
+        ConfigDebug("LoadConfig: Apply failed - " .. tostring(applyErr))
+        return false, "Apply failed"
+    end
+    
+    ConfigDebug("LoadConfig: SUCCESS")
+    return true, "Loaded"
 end
 
 -- Delete config
 local function DeleteConfig(name)
-    if not name or name == "" then return false end
+    if not name or name == "" then 
+        ConfigDebug("DeleteConfig: No name provided")
+        return false, "No name" 
+    end
+    
+    name = tostring(name)
+    ConfigDebug("DeleteConfig: Deleting '" .. name .. "'")
     
     -- Delete JSON file
     local path = GetConfigPath(name)
-    SafeDelFile(path)
     
-    -- Also delete via WindUI ConfigManager
-    pcall(function()
-        local ConfigManager = Window and Window.ConfigManager
-        if ConfigManager then
-            local cfg = ConfigManager:CreateConfig(name)
-            if cfg and cfg.Delete then cfg:Delete() end
-        end
-    end)
-    
-    return true
+    if SafeIsFile(path) then
+        local success = SafeDelFile(path)
+        ConfigDebug("DeleteConfig: " .. (success and "SUCCESS" or "FAILED"))
+        return success
+    else
+        ConfigDebug("DeleteConfig: File not found at " .. path)
+        return false, "File not found"
+    end
 end
 
 -- ===== UI SECTION =====
@@ -13413,53 +13503,68 @@ local function GetAllConfigsSafe()
     local configs = {}
     local seen = {}
     
-    -- 1. Scan folder for saved configs (JSON files)
+    ConfigDebug("GetAllConfigsSafe: Scanning folder " .. KATCHI_CONFIG_FOLDER)
+    
+    -- Ensure folder exists first
+    if not SafeIsFolderExists(KATCHI_CONFIG_FOLDER) then
+        SafeMakeFolder(KATCHI_CONFIG_FOLDER)
+    end
+    
+    -- Scan folder for saved configs (JSON files)
     local files = SafeListFiles(KATCHI_CONFIG_FOLDER)
-    for _, path in ipairs(files) do
-        local name = path:match(KATCHI_CONFIG_PREFIX .. "(.+)%.json$")
+    ConfigDebug("GetAllConfigsSafe: Found " .. #files .. " files")
+    
+    for _, fullPath in ipairs(files) do
+        -- Extract just the filename from the path
+        local filename = fullPath:match("([^/\\]+)$") or fullPath
+        ConfigDebug("GetAllConfigsSafe: Checking file '" .. filename .. "'")
+        
+        -- Match our config prefix pattern
+        local name = filename:match(KATCHI_CONFIG_PREFIX .. "(.+)%.json$")
         if name and not seen[name] then
+            ConfigDebug("GetAllConfigsSafe: Found config '" .. name .. "'")
             table.insert(configs, name)
             seen[name] = true
         end
     end
     
-    -- 2. Also check WindUI ConfigManager
-    pcall(function()
-        local ConfigManager = Window and Window.ConfigManager
-        if ConfigManager and ConfigManager.AllConfigs then
-            local list = ConfigManager:AllConfigs()
-            if type(list) == "table" then
-                for _, v in ipairs(list) do
-                    local n = tostring(v)
-                    if not seen[n] then
-                        table.insert(configs, n)
-                        seen[n] = true
-                    end
-                end
-            end
-        end
-    end)
-    
+    ConfigDebug("GetAllConfigsSafe: Total " .. #configs .. " configs found")
     return configs
 end
 
 local function RefreshConfigsDropdown()
+    ConfigDebug("RefreshConfigsDropdown: Refreshing...")
     local list = GetAllConfigsSafe()
-    if selectedProfile and not table.find(list, selectedProfile) then selectedProfile = nil end
     
-    local newValue = selectedProfile or list[1] or ""
+    -- If selectedProfile is not in the list, clear it
+    if selectedProfile and not table.find(list, selectedProfile) then 
+        selectedProfile = nil 
+    end
+    
+    local newValue = selectedProfile or (list[1] or "")
+    ConfigDebug("RefreshConfigsDropdown: " .. #list .. " configs, selected: " .. tostring(newValue))
 
     if ConfigDropdown then
         pcall(function()
+            -- Try different methods to update dropdown
             if ConfigDropdown.SetValues then 
                 ConfigDropdown:SetValues(list)
+                ConfigDebug("RefreshConfigsDropdown: Used SetValues")
             elseif ConfigDropdown.SetOptions then 
                 ConfigDropdown:SetOptions(list)
+                ConfigDebug("RefreshConfigsDropdown: Used SetOptions")
+            elseif ConfigDropdown.Refresh then
+                ConfigDropdown:Refresh(list)
+                ConfigDebug("RefreshConfigsDropdown: Used Refresh")
             end
-            if ConfigDropdown.SetValue then
+            
+            if ConfigDropdown.SetValue and newValue ~= "" then
                 ConfigDropdown:SetValue(newValue)
+                ConfigDebug("RefreshConfigsDropdown: Set value to " .. newValue)
             end
         end)
+    else
+        ConfigDebug("RefreshConfigsDropdown: ConfigDropdown is nil!")
     end
 end
 
@@ -13549,6 +13654,19 @@ ConfigSection:Button({
     Callback = function()
         RefreshConfigsDropdown()
         notify("Config", "Refreshed list", "refresh-cw", 1.3)
+    end
+})
+
+-- Debug toggle for troubleshooting
+ConfigSection:Toggle({
+    Title = "Debug Mode",
+    Desc = "Enable config debug messages in console (F9)",
+    Value = false,
+    Callback = function(val)
+        CONFIG_DEBUG = val
+        if val then
+            notify("Config", "Debug mode ON - check console (F9)", "terminal", 2)
+        end
     end
 })
 
