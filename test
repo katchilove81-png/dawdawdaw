@@ -12959,530 +12959,11 @@ do -- // Configs & Theme Tab
         Locked = false,
     })
 
--- ===== KATCHI CUSTOM CONFIG SYSTEM =====
--- Saves ALL settings including ESP, Player ESP, Kill Aura, etc.
--- Uses executor's writefile/readfile for JSON storage
+-- ===== WindUI Built-in Config System =====
+-- Uses WindUI's ConfigManager which handles file operations internally
+-- All UI elements with Flag="..." are automatically saved/loaded
 
-local KATCHI_CONFIG_FOLDER = "KatchiHub"
-local KATCHI_CONFIG_PREFIX = "KatchiConfig_"
-local CONFIG_DEBUG = false -- Set to true to enable debug messages
-
-local function ConfigDebug(msg)
-    if CONFIG_DEBUG then warn("[CONFIG DEBUG] " .. tostring(msg)) end
-end
-
--- Simple file wrappers with better error handling
-local function SafeWriteFile(path, content)
-    local success = false
-    local err = nil
-    
-    -- Try standard writefile
-    local ok1, e1 = pcall(function()
-        if writefile then 
-            writefile(path, content)
-            success = true 
-        end
-    end)
-    if not ok1 then err = e1 end
-    
-    -- Try syn.writefile as fallback
-    if not success then
-        local ok2, e2 = pcall(function()
-            if syn and syn.writefile then 
-                syn.writefile(path, content)
-                success = true 
-            end
-        end)
-        if not ok2 then err = e2 end
-    end
-    
-    ConfigDebug("SafeWriteFile(" .. path .. "): " .. (success and "OK" or ("FAIL: " .. tostring(err))))
-    return success
-end
-
-local function SafeReadFile(path)
-    local content = nil
-    local err = nil
-    
-    local ok1, e1 = pcall(function() 
-        if readfile then content = readfile(path) end 
-    end)
-    if not ok1 then err = e1 end
-    
-    if not content then
-        local ok2, e2 = pcall(function() 
-            if syn and syn.readfile then content = syn.readfile(path) end 
-        end)
-        if not ok2 then err = e2 end
-    end
-    
-    ConfigDebug("SafeReadFile(" .. path .. "): " .. (content and ("OK, " .. #content .. " bytes") or ("FAIL: " .. tostring(err))))
-    return content
-end
-
-local function SafeListFiles(folder)
-    local files = {}
-    local ok, err = pcall(function() 
-        if listfiles then files = listfiles(folder) end 
-    end)
-    ConfigDebug("SafeListFiles(" .. folder .. "): " .. (ok and (#files .. " files") or ("FAIL: " .. tostring(err))))
-    return files
-end
-
-local function SafeDelFile(path)
-    local success = false
-    local ok, err = pcall(function() 
-        if delfile then 
-            delfile(path) 
-            success = true
-        end 
-    end)
-    ConfigDebug("SafeDelFile(" .. path .. "): " .. (success and "OK" or ("FAIL: " .. tostring(err))))
-    return success
-end
-
-local function SafeMakeFolder(path)
-    local ok, err = pcall(function() 
-        if makefolder then makefolder(path) end 
-    end)
-    -- Also try isfolder check first
-    pcall(function()
-        if isfolder and not isfolder(path) then
-            if makefolder then makefolder(path) end
-        end
-    end)
-    ConfigDebug("SafeMakeFolder(" .. path .. "): " .. (ok and "OK" or ("FAIL: " .. tostring(err))))
-end
-
-local function SafeIsFile(path)
-    local exists = false
-    pcall(function() if isfile then exists = isfile(path) end end)
-    ConfigDebug("SafeIsFile(" .. path .. "): " .. tostring(exists))
-    return exists
-end
-
-local function SafeIsFolderExists(path)
-    local exists = false
-    pcall(function() if isfolder then exists = isfolder(path) end end)
-    return exists
-end
-
--- Ensure folder exists
-if not SafeIsFolderExists(KATCHI_CONFIG_FOLDER) then
-    SafeMakeFolder(KATCHI_CONFIG_FOLDER)
-end
-
-local function GetConfigPath(name)
-    return KATCHI_CONFIG_FOLDER .. "/" .. KATCHI_CONFIG_PREFIX .. tostring(name) .. ".json"
-end
-
--- Get all saved configs
-local function GetAllConfigs()
-    local configs = {}
-    local files = SafeListFiles(KATCHI_CONFIG_FOLDER)
-    for _, path in ipairs(files) do
-        local name = path:match(KATCHI_CONFIG_PREFIX .. "(.+)%.json$")
-        if name then
-            table.insert(configs, name)
-        end
-    end
-    return configs
-end
-
--- Collect ALL current settings into a table
-local function CollectAllSettings()
-    local settings = {}
-    
-    -- Kill Aura Settings
-    settings.KillAura = {
-        Enabled = KillAuraEnabled or false,
-        Range = KillAuraRange or 10,
-        AttackSpeed = KillAuraAttackSpeed or 0.1,
-        Randomness = KillAuraRandomness or 0,
-        MultiTargets = KillAuraMultiTargets or 5,
-        AutoLook = KillAuraAutoLook or false,
-        AutoEquipMelee = KillAura_AutoEquipMelee or false,
-        EnableBayonet = KillAura_EnableBayonet or false,
-        HitboxExpanderEnabled = KillAura_HitboxExpanderEnabled or false,
-        SelectedZombieTypes = {}
-    }
-    -- Save zombie types for kill aura
-    if KillAura_SelectedZombieTypes then
-        for k, v in pairs(KillAura_SelectedZombieTypes) do
-            settings.KillAura.SelectedZombieTypes[k] = v
-        end
-    end
-    
-    -- ESP Settings
-    settings.ESP = {
-        SelectedTypes = {},
-        EnabledTypes = {},
-        Colors = {}
-    }
-    if SelectedESPs then
-        for _, v in ipairs(SelectedESPs) do
-            table.insert(settings.ESP.SelectedTypes, v)
-        end
-    end
-    if EnabledESPs then
-        for k, v in pairs(EnabledESPs) do
-            settings.ESP.EnabledTypes[k] = v
-        end
-    end
-    if ESPConfigs then
-        for typeName, cfg in pairs(ESPConfigs) do
-            if cfg.color then
-                settings.ESP.Colors[typeName] = {
-                    R = math.floor(cfg.color.R * 255),
-                    G = math.floor(cfg.color.G * 255),
-                    B = math.floor(cfg.color.B * 255)
-                }
-            end
-        end
-    end
-    
-    -- Player ESP Settings
-    settings.PlayerESP = {
-        ChamsEnabled = ChamsESPEnabled or false,
-        BillboardEnabled = BillboardESPEnabled or false,
-        ShowHealthBar = ShowHealthBarEnabled or false,
-        ShowInfectionBar = ShowInfectionBarEnabled or false,
-        NotifyLowHealth = NotifyLowHealthEnabled or false,
-        NotifyGrabbedPinned = NotifyGrabbedPinnedEnabled or false,
-        ChamsTransparency = ChamsFillTransparency or 0.45,
-        BillboardDistance = BillboardShowDistance or 5,
-        PerformanceMode = PerformanceModeEnabled or false
-    }
-    
-    -- Gun/Silent Aim Settings
-    settings.Gun = {
-        CheckWalls = CHECK_WALLS or true,
-        AutoReload = AUTO_RELOAD_ENABLED or false,
-        AutoShoot = USER_AUTO_SHOOT_TOGGLE or false,
-        InstantShoot = INSTANT_SHOOT_ENABLED or false,
-        SilentAimEnabled = SILENT_AIM_ENABLED or false,
-        SilentAimSavePlayers = SILENT_AIM_SAVE_PLAYERS_ENABLED or false,
-        SilentAimBomberNear = SILENT_AIM_BOMBER_NEAR_ENABLED or false,
-        SilentAimAutoAim = SILENT_AIM_AUTO_AIM or false,
-        AutoSavePlayers = AUTO_SAVE_PLAYERS_ENABLED or false,
-        UseFov = USE_FOV or false,
-        ShowFov = SHOW_FOV or false,
-        FovSize = FOV_SIZE_DEG or 50,
-        TargetEsp = TARGET_ESP_ENABLED or false,
-        AimDot = AIM_DOT_ENABLED or false,
-        BomberSafeTeammates = BOMBER_SAFE_TEAMMATES or false,
-        BomberSafeSelf = BOMBER_SAFE_SELF or false,
-        BomberSafeRadius = BOMBER_SAFE_RADIUS or 10,
-        PredictionDistance = PREDICTION_DISTANCE or 0
-    }
-    -- Gun selected types
-    settings.Gun.SelectedShootTypes = {}
-    settings.Gun.EnabledShootTypes = {}
-    if SelectedShootTypes then
-        for _, v in ipairs(SelectedShootTypes) do
-            table.insert(settings.Gun.SelectedShootTypes, v)
-        end
-    end
-    if EnabledShootTypes then
-        for k, v in pairs(EnabledShootTypes) do
-            settings.Gun.EnabledShootTypes[k] = v
-        end
-    end
-    -- Silent Aim types
-    settings.Gun.SilentAimSelectedTypes = {}
-    settings.Gun.SilentAimEnabledTypes = {}
-    if SilentAimSelectedTypes then
-        for _, v in ipairs(SilentAimSelectedTypes) do
-            table.insert(settings.Gun.SilentAimSelectedTypes, v)
-        end
-    end
-    if SilentAimEnabledTypes then
-        for k, v in pairs(SilentAimEnabledTypes) do
-            settings.Gun.SilentAimEnabledTypes[k] = v
-        end
-    end
-    
-    -- Head Hit / Hitbox Settings
-    settings.HeadHit = {
-        Enabled = HeadHitEnabled or false,
-        HitboxEnabled = hitboxEnabled or false,
-        HitboxSize = hitboxSize or 10
-    }
-    
-    -- Shove/Anti-Grab Settings
-    settings.Shove = {
-        AntiGrabEnabled = AntiGrabEnabled or false,
-        ShoveAuraEnabled = ShoveAuraEnabled or false,
-        ShoveHitboxEnabled = ShoveHitboxExpanderEnabled or false,
-        ShoveHitboxRange = ShoveHitboxExpanderRange or 20,
-        ShoveHitboxTargets = ShoveHitboxExpanderTargets or 10,
-        AutoParrySapper = AutoParrySapperMeleeEnabled or false
-    }
-    
-    return settings
-end
-
--- Apply loaded settings to state variables and UI
-local function ApplyAllSettings(settings)
-    if not settings then return end
-    
-    -- Kill Aura
-    if settings.KillAura then
-        local ka = settings.KillAura
-        KillAuraEnabled = ka.Enabled or false
-        KillAuraRange = ka.Range or 10
-        KillAuraAttackSpeed = ka.AttackSpeed or 0.1
-        KillAuraRandomness = ka.Randomness or 0
-        KillAuraMultiTargets = ka.MultiTargets or 5
-        KillAuraAutoLook = ka.AutoLook or false
-        KillAura_AutoEquipMelee = ka.AutoEquipMelee or false
-        KillAura_EnableBayonet = ka.EnableBayonet or false
-        KillAura_HitboxExpanderEnabled = ka.HitboxExpanderEnabled or false
-        if ka.SelectedZombieTypes and KillAura_SelectedZombieTypes then
-            for k, v in pairs(ka.SelectedZombieTypes) do
-                KillAura_SelectedZombieTypes[k] = v
-            end
-        end
-    end
-    
-    -- ESP
-    if settings.ESP then
-        local esp = settings.ESP
-        if esp.SelectedTypes then
-            SelectedESPs = {}
-            previousSelectedESPs = {}
-            for _, v in ipairs(esp.SelectedTypes) do
-                table.insert(SelectedESPs, v)
-                table.insert(previousSelectedESPs, v)
-            end
-        end
-        if esp.EnabledTypes then
-            EnabledESPs = EnabledESPs or {}
-            for k, v in pairs(esp.EnabledTypes) do
-                EnabledESPs[k] = v
-            end
-        end
-        if esp.Colors and ESPConfigs then
-            for typeName, colorData in pairs(esp.Colors) do
-                if ESPConfigs[typeName] then
-                    ESPConfigs[typeName].color = Color3.fromRGB(colorData.R or 255, colorData.G or 255, colorData.B or 255)
-                end
-            end
-        end
-    end
-    
-    -- Player ESP
-    if settings.PlayerESP then
-        local pe = settings.PlayerESP
-        ChamsESPEnabled = pe.ChamsEnabled or false
-        BillboardESPEnabled = pe.BillboardEnabled or false
-        ShowHealthBarEnabled = pe.ShowHealthBar or false
-        ShowInfectionBarEnabled = pe.ShowInfectionBar or false
-        NotifyLowHealthEnabled = pe.NotifyLowHealth or false
-        NotifyGrabbedPinnedEnabled = pe.NotifyGrabbedPinned or false
-        ChamsFillTransparency = pe.ChamsTransparency or 0.45
-        BillboardShowDistance = pe.BillboardDistance or 5
-        PerformanceModeEnabled = pe.PerformanceMode or false
-    end
-    
-    -- Gun Settings
-    if settings.Gun then
-        local g = settings.Gun
-        CHECK_WALLS = g.CheckWalls ~= false
-        AUTO_RELOAD_ENABLED = g.AutoReload or false
-        USER_AUTO_SHOOT_TOGGLE = g.AutoShoot or false
-        INSTANT_SHOOT_ENABLED = g.InstantShoot or false
-        SILENT_AIM_ENABLED = g.SilentAimEnabled or false
-        SILENT_AIM_SAVE_PLAYERS_ENABLED = g.SilentAimSavePlayers or false
-        SILENT_AIM_BOMBER_NEAR_ENABLED = g.SilentAimBomberNear or false
-        SILENT_AIM_AUTO_AIM = g.SilentAimAutoAim or false
-        AUTO_SAVE_PLAYERS_ENABLED = g.AutoSavePlayers or false
-        USE_FOV = g.UseFov or false
-        SHOW_FOV = g.ShowFov or false
-        FOV_SIZE_DEG = g.FovSize or 50
-        TARGET_ESP_ENABLED = g.TargetEsp or false
-        AIM_DOT_ENABLED = g.AimDot or false
-        BOMBER_SAFE_TEAMMATES = g.BomberSafeTeammates or false
-        BOMBER_SAFE_SELF = g.BomberSafeSelf or false
-        BOMBER_SAFE_RADIUS = g.BomberSafeRadius or 10
-        PREDICTION_DISTANCE = g.PredictionDistance or 0
-        
-        if g.SelectedShootTypes then
-            SelectedShootTypes = {}
-            for _, v in ipairs(g.SelectedShootTypes) do
-                table.insert(SelectedShootTypes, v)
-            end
-        end
-        if g.EnabledShootTypes then
-            EnabledShootTypes = EnabledShootTypes or {}
-            for k, v in pairs(g.EnabledShootTypes) do
-                EnabledShootTypes[k] = v
-            end
-        end
-        if g.SilentAimSelectedTypes then
-            SilentAimSelectedTypes = {}
-            for _, v in ipairs(g.SilentAimSelectedTypes) do
-                table.insert(SilentAimSelectedTypes, v)
-            end
-        end
-        if g.SilentAimEnabledTypes then
-            SilentAimEnabledTypes = SilentAimEnabledTypes or {}
-            for k, v in pairs(g.SilentAimEnabledTypes) do
-                SilentAimEnabledTypes[k] = v
-            end
-        end
-    end
-    
-    -- Head Hit / Hitbox
-    if settings.HeadHit then
-        local hh = settings.HeadHit
-        HeadHitEnabled = hh.Enabled or false
-        hitboxEnabled = hh.HitboxEnabled or false
-        hitboxSize = hh.HitboxSize or 10
-    end
-    
-    -- Shove/Anti-Grab
-    if settings.Shove then
-        local s = settings.Shove
-        AntiGrabEnabled = s.AntiGrabEnabled or false
-        ShoveAuraEnabled = s.ShoveAuraEnabled or false
-        ShoveHitboxExpanderEnabled = s.ShoveHitboxEnabled or false
-        ShoveHitboxExpanderRange = s.ShoveHitboxRange or 20
-        ShoveHitboxExpanderTargets = s.ShoveHitboxTargets or 10
-        AutoParrySapperMeleeEnabled = s.AutoParrySapper or false
-    end
-end
-
--- Save config to file
-local function SaveConfig(name)
-    if not name or name == "" then 
-        ConfigDebug("SaveConfig: No name provided")
-        return false, "No name" 
-    end
-    
-    -- Sanitize name
-    name = tostring(name):gsub("[^%w%-%_]", "")
-    if name == "" then 
-        ConfigDebug("SaveConfig: Invalid name after sanitization")
-        return false, "Invalid name" 
-    end
-    
-    ConfigDebug("SaveConfig: Saving '" .. name .. "'")
-    
-    -- Ensure folder exists
-    if not SafeIsFolderExists(KATCHI_CONFIG_FOLDER) then
-        SafeMakeFolder(KATCHI_CONFIG_FOLDER)
-    end
-    
-    -- Collect settings
-    local settings = CollectAllSettings()
-    ConfigDebug("SaveConfig: Collected settings")
-    
-    -- Encode to JSON
-    local jsonStr = nil
-    local encodeOk, encodeErr = pcall(function()
-        jsonStr = game:GetService("HttpService"):JSONEncode(settings)
-    end)
-    
-    if not encodeOk or not jsonStr then
-        ConfigDebug("SaveConfig: JSON encode failed - " .. tostring(encodeErr))
-        return false, "JSON encode failed"
-    end
-    
-    ConfigDebug("SaveConfig: JSON encoded (" .. #jsonStr .. " bytes)")
-    
-    -- Write file
-    local path = GetConfigPath(name)
-    local fileSuccess = SafeWriteFile(path, jsonStr)
-    
-    if fileSuccess then
-        ConfigDebug("SaveConfig: SUCCESS - saved to " .. path)
-        return true, "Saved"
-    else
-        ConfigDebug("SaveConfig: FAILED to write file")
-        return false, "Failed to write file"
-    end
-end
-
--- Load config from file
-local function LoadConfig(name)
-    if not name or name == "" then 
-        ConfigDebug("LoadConfig: No name provided")
-        return false, "No name" 
-    end
-    
-    name = tostring(name)
-    ConfigDebug("LoadConfig: Loading '" .. name .. "'")
-    
-    -- Check if file exists
-    local path = GetConfigPath(name)
-    ConfigDebug("LoadConfig: Checking path " .. path)
-    
-    if not SafeIsFile(path) then
-        ConfigDebug("LoadConfig: File does not exist")
-        return false, "Config not found"
-    end
-    
-    -- Read file
-    local content = SafeReadFile(path)
-    if not content or content == "" then
-        ConfigDebug("LoadConfig: Failed to read file or empty content")
-        return false, "Failed to read file"
-    end
-    
-    ConfigDebug("LoadConfig: Read " .. #content .. " bytes")
-    
-    -- Decode JSON
-    local settings = nil
-    local decodeOk, decodeErr = pcall(function()
-        settings = game:GetService("HttpService"):JSONDecode(content)
-    end)
-    
-    if not decodeOk or not settings then
-        ConfigDebug("LoadConfig: JSON decode failed - " .. tostring(decodeErr))
-        return false, "JSON decode failed"
-    end
-    
-    ConfigDebug("LoadConfig: JSON decoded, applying settings...")
-    
-    -- Apply settings
-    local applyOk, applyErr = pcall(function()
-        ApplyAllSettings(settings)
-    end)
-    
-    if not applyOk then
-        ConfigDebug("LoadConfig: Apply failed - " .. tostring(applyErr))
-        return false, "Apply failed"
-    end
-    
-    ConfigDebug("LoadConfig: SUCCESS")
-    return true, "Loaded"
-end
-
--- Delete config
-local function DeleteConfig(name)
-    if not name or name == "" then 
-        ConfigDebug("DeleteConfig: No name provided")
-        return false, "No name" 
-    end
-    
-    name = tostring(name)
-    ConfigDebug("DeleteConfig: Deleting '" .. name .. "'")
-    
-    -- Delete JSON file
-    local path = GetConfigPath(name)
-    
-    if SafeIsFile(path) then
-        local success = SafeDelFile(path)
-        ConfigDebug("DeleteConfig: " .. (success and "SUCCESS" or "FAILED"))
-        return success
-    else
-        ConfigDebug("DeleteConfig: File not found at " .. path)
-        return false, "File not found"
-    end
-end
-
--- ===== UI SECTION =====
+local ConfigManager = Window.ConfigManager
 local ConfigSection = skibiTab:Section({
     Title = "Configs",
     Icon = "file-plus",
@@ -13492,6 +12973,7 @@ local ConfigSection = skibiTab:Section({
 local profileName = "default"
 local selectedProfile = nil
 local ConfigDropdown = nil
+local overwriteExisting = true
 
 local function notify(title, content, icon, dur)
     if WindUI then
@@ -13500,71 +12982,26 @@ local function notify(title, content, icon, dur)
 end
 
 local function GetAllConfigsSafe()
-    local configs = {}
-    local seen = {}
-    
-    ConfigDebug("GetAllConfigsSafe: Scanning folder " .. KATCHI_CONFIG_FOLDER)
-    
-    -- Ensure folder exists first
-    if not SafeIsFolderExists(KATCHI_CONFIG_FOLDER) then
-        SafeMakeFolder(KATCHI_CONFIG_FOLDER)
-    end
-    
-    -- Scan folder for saved configs (JSON files)
-    local files = SafeListFiles(KATCHI_CONFIG_FOLDER)
-    ConfigDebug("GetAllConfigsSafe: Found " .. #files .. " files")
-    
-    for _, fullPath in ipairs(files) do
-        -- Extract just the filename from the path
-        local filename = fullPath:match("([^/\\]+)$") or fullPath
-        ConfigDebug("GetAllConfigsSafe: Checking file '" .. filename .. "'")
-        
-        -- Match our config prefix pattern
-        local name = filename:match(KATCHI_CONFIG_PREFIX .. "(.+)%.json$")
-        if name and not seen[name] then
-            ConfigDebug("GetAllConfigsSafe: Found config '" .. name .. "'")
-            table.insert(configs, name)
-            seen[name] = true
-        end
-    end
-    
-    ConfigDebug("GetAllConfigsSafe: Total " .. #configs .. " configs found")
-    return configs
+    local ok, list = pcall(function() return ConfigManager:AllConfigs() end)
+    if not ok or type(list) ~= "table" then return {} end
+    local out = {}
+    for _, v in ipairs(list) do table.insert(out, tostring(v)) end
+    return out
 end
 
 local function RefreshConfigsDropdown()
-    ConfigDebug("RefreshConfigsDropdown: Refreshing...")
     local list = GetAllConfigsSafe()
-    
-    -- If selectedProfile is not in the list, clear it
-    if selectedProfile and not table.find(list, selectedProfile) then 
-        selectedProfile = nil 
-    end
-    
-    local newValue = selectedProfile or (list[1] or "")
-    ConfigDebug("RefreshConfigsDropdown: " .. #list .. " configs, selected: " .. tostring(newValue))
+    if selectedProfile and not table.find(list, selectedProfile) then selectedProfile = nil end
 
     if ConfigDropdown then
         pcall(function()
-            -- Try different methods to update dropdown
-            if ConfigDropdown.SetValues then 
-                ConfigDropdown:SetValues(list)
-                ConfigDebug("RefreshConfigsDropdown: Used SetValues")
-            elseif ConfigDropdown.SetOptions then 
-                ConfigDropdown:SetOptions(list)
-                ConfigDebug("RefreshConfigsDropdown: Used SetOptions")
-            elseif ConfigDropdown.Refresh then
-                ConfigDropdown:Refresh(list)
-                ConfigDebug("RefreshConfigsDropdown: Used Refresh")
-            end
-            
-            if ConfigDropdown.SetValue and newValue ~= "" then
-                ConfigDropdown:SetValue(newValue)
-                ConfigDebug("RefreshConfigsDropdown: Set value to " .. newValue)
-            end
+            if ConfigDropdown.SetValues then ConfigDropdown:SetValues(list); return end
+            if ConfigDropdown.SetOptions then ConfigDropdown:SetOptions(list); return end
+            if ConfigDropdown.Update then ConfigDropdown:Update(list); return end
+            if ConfigDropdown.Refresh then ConfigDropdown:Refresh(list); return end
+            ConfigDropdown.Values = list
+            ConfigDropdown.Value = selectedProfile or list[1] or nil
         end)
-    else
-        ConfigDebug("RefreshConfigsDropdown: ConfigDropdown is nil!")
     end
 end
 
@@ -13588,15 +13025,32 @@ ConfigSection:Button({
         local name = tostring(profileName or ""):gsub("^%s+", ""):gsub("%s+$", "")
         if name == "" then notify("Config", "Enter a profile name first", "alert-circle", 2); return end
 
-        -- Use WindUI's built-in config system
-        local success, msg = SaveConfig(name)
-        if success then
-            notify("Config", ("Saved '%s'"):format(name), "check", 2)
+        local existing = GetAllConfigsSafe()
+        local exists = table.find(existing, name) ~= nil
+
+        if exists and not overwriteExisting then
+            notify("Config", ("Profile '%s' already exists. Enable Overwrite to replace it."):format(name), "alert-circle", 2)
+            return
+        end
+
+        -- Create config object
+        local ok, cfg = pcall(function() return ConfigManager:CreateConfig(name) end)
+        if not ok or not cfg then notify("Config", "Failed to create config object", "x", 2); return end
+
+        -- If exists and we want to overwrite, delete first then recreate
+        if exists and overwriteExisting then
+            pcall(function() cfg:Delete() end)
+            local ok2, cfg2 = pcall(function() return ConfigManager:CreateConfig(name) end)
+            if ok2 and cfg2 then cfg = cfg2 end
+        end
+
+        local suc = pcall(function() cfg:Save() end)
+        if suc then
+            notify("Config", ("Saved '%s' ✓"):format(name), "check", 2)
             selectedProfile = name
-            task.wait(0.1)
             RefreshConfigsDropdown()
         else
-            notify("Config", ("Failed to save '%s': %s"):format(name, msg or "Unknown error"), "x", 2)
+            notify("Config", ("Failed to save '%s'"):format(name), "x", 2)
         end
     end
 })
@@ -13612,32 +13066,44 @@ ConfigDropdown = ConfigSection:Dropdown({
     end
 })
 
--- Load button (Universal)
+-- Load button
 ConfigSection:Button({
     Title = "Load Selected",
     Desc = "Load The Selected Config",
     Callback = function()
-        if not selectedProfile or tostring(selectedProfile) == "" then notify("Config", "Select a profile first", "alert-circle", 2); return end
+        if not selectedProfile or tostring(selectedProfile) == "" then 
+            notify("Config", "Select a profile first", "alert-circle", 2)
+            return 
+        end
         
-        local success, msg = LoadConfig(selectedProfile)
-        if success then
-            notify("Config", ("Loaded '%s'"):format(selectedProfile), "download", 2)
+        local ok, cfg = pcall(function() return ConfigManager:CreateConfig(selectedProfile) end)
+        if not ok or not cfg then notify("Config", "Failed to create config object", "x", 2); return end
+        
+        local suc = pcall(function() cfg:Load() end)
+        if suc then
+            notify("Config", ("Loaded '%s' ✓"):format(selectedProfile), "download", 2)
             RefreshConfigsDropdown()
         else
-            notify("Config", ("Failed to load '%s': %s"):format(selectedProfile, msg or "Not found"), "x", 2)
+            notify("Config", ("Failed to load '%s'"):format(selectedProfile), "x", 2)
         end
     end
 })
 
--- Delete button (Universal)
+-- Delete button
 ConfigSection:Button({
     Title = "Delete Selected",
     Desc = "Delete the selected Config",
     Callback = function()
-        if not selectedProfile or tostring(selectedProfile) == "" then notify("Config", "Select a profile first", "alert-circle", 2); return end
+        if not selectedProfile or tostring(selectedProfile) == "" then 
+            notify("Config", "Select a profile first", "alert-circle", 2)
+            return 
+        end
         
-        local success = DeleteConfig(selectedProfile)
-        if success then
+        local ok, cfg = pcall(function() return ConfigManager:CreateConfig(selectedProfile) end)
+        if not ok or not cfg then notify("Config", "Failed to create config object", "x", 2); return end
+        
+        local suc = pcall(function() cfg:Delete() end)
+        if suc then
             notify("Config", ("Deleted '%s'"):format(selectedProfile), "trash", 2)
             selectedProfile = nil
             RefreshConfigsDropdown()
@@ -13647,7 +13113,7 @@ ConfigSection:Button({
     end
 })
 
--- Manual refresh button
+-- Refresh button
 ConfigSection:Button({
     Title = "Refresh List",
     Desc = "Refresh the dropdown of saved Configs",
@@ -13657,16 +13123,13 @@ ConfigSection:Button({
     end
 })
 
--- Debug toggle for troubleshooting
+-- Overwrite toggle
 ConfigSection:Toggle({
-    Title = "Debug Mode",
-    Desc = "Enable config debug messages in console (F9)",
-    Value = false,
+    Title = "Overwrite Existing",
+    Desc = "Allow overwriting configs with the same name",
+    Value = overwriteExisting,
     Callback = function(val)
-        CONFIG_DEBUG = val
-        if val then
-            notify("Config", "Debug mode ON - check console (F9)", "terminal", 2)
-        end
+        overwriteExisting = val
     end
 })
 
