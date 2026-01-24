@@ -14293,7 +14293,7 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         })
         
         -- ===== ZOMBIE ANIMATIONS =====
-        AnimPresetSection:Separator({ Text = "Zombie Animations" })
+        AnimPresetSection:Paragraph({ Title = "━━━ Zombie Animations ━━━", Desc = "" })
         
         AnimPresetSection:Button({
             Title = "Ancient Zapper",
@@ -14391,7 +14391,7 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         })
         
         -- ===== CHARACTER ANIMATIONS =====
-        AnimPresetSection:Separator({ Text = "Character Animations" })
+        AnimPresetSection:Paragraph({ Title = "━━━ Character Animations ━━━", Desc = "" })
         
         AnimPresetSection:Button({
             Title = "Superman",
@@ -14442,7 +14442,7 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         })
         
         -- ===== COMBAT ANIMATIONS =====
-        AnimPresetSection:Separator({ Text = "Combat Animations" })
+        AnimPresetSection:Paragraph({ Title = "━━━ Combat Animations ━━━", Desc = "" })
         
         AnimPresetSection:Button({
             Title = "Musket Charge",
@@ -14517,7 +14517,7 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         })
         
         -- ===== SPECIAL ANIMATIONS =====
-        AnimPresetSection:Separator({ Text = "Special Animations" })
+        AnimPresetSection:Paragraph({ Title = "━━━ Special Animations ━━━", Desc = "" })
         
         AnimPresetSection:Button({
             Title = "Play Dead",
@@ -14628,7 +14628,7 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         })
         
         -- ===== INJURY ANIMATIONS =====
-        AnimPresetSection:Separator({ Text = "Injury Animations" })
+        AnimPresetSection:Paragraph({ Title = "━━━ Injury Animations ━━━", Desc = "" })
         
         AnimPresetSection:Button({
             Title = "Cuirassier Stabbed",
@@ -14693,7 +14693,7 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         })
         
         -- ===== CINEMATIC SEQUENCES =====
-        AnimPresetSection:Separator({ Text = "Cinematic Sequences" })
+        AnimPresetSection:Paragraph({ Title = "━━━ Cinematic Sequences ━━━", Desc = "" })
         
         AnimPresetSection:Button({
             Title = "Old Blücher",
