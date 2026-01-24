@@ -8674,17 +8674,93 @@ local function KillAura_performKillAura(hrp)
         end
     end
 
-    -- Auto-look using BodyGyro (doesn't affect movement at all)
-    -- Skip if flying - the fly loop handles Auto Look integration
-    if KillAuraAutoLook and firstTarget and firstTarget.head and firstTarget.head.Parent and not FlyEnabled then
+    -- Auto-look is now handled separately in KillAura_performAutoLook
+end
+
+-- Separate Auto Look function that finds the nearest zombie independently
+local function KillAura_performAutoLook(hrp)
+    if not KillAuraAutoLook then
+        -- Clean up BodyGyro when auto-look is disabled
         pcall(function()
-            local targetPos = firstTarget.head.Position
-            -- Calculate look direction (Y-axis only - horizontal rotation)
-            local lookAt = Vector3.new(targetPos.X, hrpPos.Y, targetPos.Z)
-            local direction = (lookAt - hrpPos)
-            
-            if direction.Magnitude > 0.1 then
-                -- Find or create our AutoLook BodyGyro
+            local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
+            if autoLookGyro then
+                autoLookGyro:Destroy()
+            end
+        end)
+        -- Re-enable fly gyro if flying
+        if FlyEnabled and FlyBodyGyro then
+            pcall(function() FlyBodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge) end)
+        end
+        return
+    end
+    
+    local hrpPos = hrp.Position
+    
+    -- Find the actual nearest zombie (independent of Kill Aura targeting)
+    local zombiesFolder = KillAura_getZombiesFolder()
+    if not zombiesFolder then
+        -- No zombies folder, clean up and re-enable fly
+        pcall(function()
+            local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
+            if autoLookGyro then autoLookGyro:Destroy() end
+        end)
+        if FlyEnabled and FlyBodyGyro then
+            pcall(function() FlyBodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge) end)
+        end
+        return
+    end
+    
+    local nearestHead = nil
+    local nearestDistSq = math.huge
+    local maxRange = 50 -- Auto look range (independent of kill aura range)
+    local maxRangeSq = maxRange * maxRange
+    
+    for _, model in ipairs(zombiesFolder:GetChildren()) do
+        if model:IsA("Model") then
+            local head = model:FindFirstChild("Head")
+            if head then
+                local headPos = head.Position
+                local dx, dy, dz = headPos.X - hrpPos.X, headPos.Y - hrpPos.Y, headPos.Z - hrpPos.Z
+                local d2 = dx*dx + dy*dy + dz*dz
+                if d2 < nearestDistSq and d2 <= maxRangeSq then
+                    nearestDistSq = d2
+                    nearestHead = head
+                end
+            end
+        end
+    end
+    
+    if nearestHead and nearestHead.Parent then
+        local targetPos = nearestHead.Position
+        -- Calculate look direction (Y-axis only - horizontal rotation)
+        local lookAt = Vector3.new(targetPos.X, hrpPos.Y, targetPos.Z)
+        local direction = (lookAt - hrpPos)
+        
+        if direction.Magnitude > 0.1 then
+            if FlyEnabled then
+                -- When flying: disable fly's BodyGyro and use our own
+                if FlyBodyGyro then
+                    pcall(function() FlyBodyGyro.MaxTorque = Vector3.new(0, 0, 0) end)
+                end
+                
+                -- Find or create our AutoLook BodyGyro with full torque
+                local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
+                if not autoLookGyro then
+                    autoLookGyro = Instance.new("BodyGyro")
+                    autoLookGyro.Name = "KatchiAutoLookGyro"
+                    autoLookGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+                    autoLookGyro.P = 50000
+                    autoLookGyro.D = 1000
+                    autoLookGyro.Parent = hrp
+                else
+                    -- Ensure full torque when flying
+                    autoLookGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+                end
+                
+                -- Set target rotation (full 3D look at target)
+                autoLookGyro.CFrame = CFrame.lookAt(hrpPos, lookAt)
+            else
+                -- Not flying: use Y-axis only rotation
                 local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
                 if not autoLookGyro then
                     autoLookGyro = Instance.new("BodyGyro")
@@ -8698,15 +8774,20 @@ local function KillAura_performKillAura(hrp)
                 -- Set target rotation
                 autoLookGyro.CFrame = CFrame.lookAt(hrpPos, hrpPos + direction.Unit)
             end
-        end)
-    elseif not FlyEnabled then
-        -- Clean up BodyGyro when auto-look is disabled or no target (only if not flying)
+        end
+    else
+        -- No target: clean up BodyGyro and re-enable fly's BodyGyro
         pcall(function()
             local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
             if autoLookGyro then
                 autoLookGyro:Destroy()
             end
         end)
+        
+        -- Re-enable fly's BodyGyro if flying
+        if FlyEnabled and FlyBodyGyro then
+            pcall(function() FlyBodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge) end)
+        end
     end
 end
 
@@ -8826,6 +8907,11 @@ task.defer(function()
         end
         if KillAuraEnabled then
             KillAura_performKillAura(hrp)
+        end
+        
+        -- Auto Look runs independently (even without Kill Aura enabled)
+        if KillAuraAutoLook then
+            KillAura_performAutoLook(hrp)
         end
     end)
 end)
@@ -15500,50 +15586,10 @@ VisualSection:Toggle({
                 flyBodyVelocity.Velocity = currentVel:Lerp(moveDirection, 0.2)
             end
             
-            -- Apply gyro - respect Auto Look if enabled and has target
-            if FlyBodyGyro and FlyBodyGyro.Parent then
-                local useAutoLook = false
-                local autoLookCFrame = camCF
-                
-                -- Check if Auto Look should override horizontal rotation
-                if KillAuraAutoLook and KillAuraEnabled then
-                    -- Find nearest zombie to look at
-                    local zombiesFolder = Workspace:FindFirstChild("Zombies")
-                    if zombiesFolder then
-                        local nearestDist = math.huge
-                        local nearestPos = nil
-                        local hrpPos = hrp.Position
-                        
-                        for _, zombie in ipairs(zombiesFolder:GetChildren()) do
-                            local head = zombie:FindFirstChild("Head")
-                            if head then
-                                local dist = (head.Position - hrpPos).Magnitude
-                                if dist < nearestDist and dist <= KillAuraRange then
-                                    nearestDist = dist
-                                    nearestPos = head.Position
-                                end
-                            end
-                        end
-                        
-                        if nearestPos then
-                            useAutoLook = true
-                            -- Calculate horizontal look direction to target
-                            local lookAt = Vector3.new(nearestPos.X, hrpPos.Y, nearestPos.Z)
-                            local direction = (lookAt - hrpPos)
-                            if direction.Magnitude > 0.1 then
-                                -- Get camera's pitch (up/down angle) but use target's yaw (left/right)
-                                local targetYaw = math.atan2(direction.X, direction.Z)
-                                local camLook = camCF.LookVector
-                                local camPitch = math.asin(math.clamp(camLook.Y, -1, 1))
-                                
-                                -- Build CFrame: target's horizontal rotation + camera's pitch
-                                autoLookCFrame = CFrame.new(hrpPos) * CFrame.Angles(0, targetYaw, 0) * CFrame.Angles(camPitch, 0, 0)
-                            end
-                        end
-                    end
-                end
-                
-                FlyBodyGyro.CFrame = autoLookCFrame
+            -- Apply gyro to follow camera (Auto Look manages this externally when it has a target)
+            -- Only apply if FlyBodyGyro has torque (Auto Look sets it to 0 when it takes over)
+            if FlyBodyGyro and FlyBodyGyro.Parent and FlyBodyGyro.MaxTorque.Magnitude > 0 then
+                FlyBodyGyro.CFrame = camCF
             end
         end)
     end
@@ -15583,8 +15629,20 @@ VisualSection:Toggle({
             FlyBodyGyro = nil
         end
         
-        -- Reset humanoid state to normal
+        -- Clean up Auto Look BodyGyro if it exists (since fly is stopping)
         local char = LocalPlayer and LocalPlayer.Character
+        if char then
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
+                if autoLookGyro then
+                    autoLookGyro:Destroy()
+                end
+            end
+        end
+        
+        -- Reset humanoid state to normal
+        char = LocalPlayer and LocalPlayer.Character
         if char then
             local humanoid = char:FindFirstChildOfClass("Humanoid")
             if humanoid then
