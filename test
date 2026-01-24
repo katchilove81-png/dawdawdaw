@@ -121,6 +121,11 @@ local ProtectedGUIs = setmetatable({}, { __mode = "v" })
 local ProtectedInstances = setmetatable({}, { __mode = "v" })
 local CloakedInstances = setmetatable({}, { __mode = "k" }) -- Instances hidden from GetChildren/GetDescendants
 
+-- PERFORMANCE: Track GUIs we've already protected to prevent double-protection
+local AlreadyProtectedGUIs = setmetatable({}, { __mode = "k" })
+-- PERFORMANCE: Track OUR script-created GUIs (only protect these, not game GUIs)
+local OurScriptGUIs = setmetatable({}, { __mode = "k" })
+
 -- Generate unique stealth name with timestamp and random components
 local function getRandomStealthName()
     local base = STEALTH_GUI_NAMES[math.random(1, #STEALTH_GUI_NAMES)]
@@ -284,9 +289,17 @@ end
 
 -- ===== MAIN GUI PROTECTION FUNCTION =====
 -- Enhanced GUI protection with multiple fallback methods and deep protection
+-- PERFORMANCE: Only protects OUR script-created GUIs, not game GUIs
 
 local function protectGUI(gui)
     if not gui then return end
+    
+    -- PERFORMANCE: Skip if already protected (prevents memory leak from repeated protection)
+    if AlreadyProtectedGUIs[gui] then return end
+    AlreadyProtectedGUIs[gui] = true
+    
+    -- PERFORMANCE: Mark as our GUI so we only rotate/protect our own GUIs
+    OurScriptGUIs[gui] = true
     
     pcall(function()
         -- Step 1: Assign random stealth name
@@ -339,11 +352,11 @@ local function protectGUI(gui)
         -- Step 5: Cloak the GUI from GetChildren/FindFirstChild
         cloakInstance(gui)
         
-        -- Step 6: Protect all child elements
-        protectAllChildren(gui)
+        -- PERFORMANCE: Skip deep child protection (causes overhead)
+        -- protectAllChildren(gui) -- DISABLED for performance
         
-        -- Step 7: Watch for new children
-        watchAndProtectChildren(gui)
+        -- PERFORMANCE: Skip child watching (causes memory leak from connections)
+        -- watchAndProtectChildren(gui) -- DISABLED for performance
     end)
 end
 
@@ -380,17 +393,31 @@ end
 
 -- ===== PERIODIC NAME ROTATION =====
 -- Rotates GUI names periodically to prevent pattern detection
+-- PERFORMANCE: Reduced frequency and only rotates OUR GUIs
 
 local function startNameRotation()
     task.defer(function()
         while true do
-            task.wait(60) -- Rotate every 60 seconds
-            for gui, _ in pairs(ProtectedGUIs) do
+            task.wait(180) -- PERFORMANCE: Rotate every 3 minutes instead of 1 minute
+            local count = 0
+            local maxPerCycle = 10 -- PERFORMANCE: Limit processing per cycle
+            for gui, _ in pairs(OurScriptGUIs) do
+                if count >= maxPerCycle then break end
                 pcall(function()
                     if gui and gui.Parent then
                         gui.Name = getRandomStealthName()
+                        count = count + 1
+                    else
+                        -- PERFORMANCE: Clean up dead references
+                        OurScriptGUIs[gui] = nil
+                        ProtectedGUIs[gui] = nil
+                        AlreadyProtectedGUIs[gui] = nil
                     end
                 end)
+            end
+            -- PERFORMANCE: Force garbage collection occasionally
+            if count > 0 then
+                pcall(function() collectgarbage("step", 100) end)
             end
         end
     end)
@@ -824,10 +851,15 @@ local function cleanAntiCheatConnections()
 end
 
 -- Run connection cleaner periodically
+-- PERFORMANCE: Reduced frequency to minimize overhead
 task.defer(function()
+    task.wait(10) -- Initial delay to let game load
+    cleanAntiCheatConnections() -- Run once at start
     while true do
+        task.wait(120) -- PERFORMANCE: Check every 2 minutes instead of 30 seconds
         cleanAntiCheatConnections()
-        task.wait(30) -- Check every 30 seconds
+        -- PERFORMANCE: Trigger garbage collection after cleanup
+        pcall(function() collectgarbage("step", 200) end)
     end
 end)
 
@@ -1000,13 +1032,178 @@ end
 
 -- ===== 11. ANTI-DETECTION STATUS =====
 _G.AntiBan = true
-_G.AntiBanVersion = "2.1"
+_G.AntiBanVersion = "2.2"
 _G.ExecutorCapabilities = ExecutorCapabilities
 _G.AntiBanStats = {
     getKickBlocked = function() return kickBlocked end,
     getBanBlocked = function() return banBlocked end,
     getAdminLogBlocked = function() return adminLogBlockCount end,
 }
+
+-- ===== 12. ENHANCED BYPASS SYSTEM (Integrated from bypass clean.lua) =====
+-- Advanced property spoofing and connection disabling
+
+pcall(function()
+    local Character = LocalPlayer.Character
+    if not Character then return end
+    local Humanoid = Character:FindFirstChildOfClass("Humanoid")
+    if not Humanoid then return end
+    local HumanoidRootPart = Character:FindFirstChild("HumanoidRootPart")
+    
+    -- Store original values for spoofing
+    local OriginalWalkSpeed = Humanoid.WalkSpeed
+    local OriginalJumpPower = Humanoid.JumpPower
+    local OriginalHealth = Humanoid.Health
+    local OriginalMaxHealth = Humanoid.MaxHealth
+    local OriginalHipHeight = Humanoid.HipHeight
+    local OriginalGravity = workspace.Gravity
+    local OriginalVelocity = HumanoidRootPart and HumanoidRootPart.Velocity or Vector3.new(0,0,0)
+    local OriginalSize = HumanoidRootPart and HumanoidRootPart.Size or Vector3.new(2,2,1)
+    
+    -- Advanced hooks using AddSetHook/AddPropertyEmulator if available
+    if ExecutorCapabilities.hasAddSetHook then
+        pcall(function() Humanoid:AddSetHook("WalkSpeed") end)
+        pcall(function() Humanoid:AddSetHook("JumpPower") end)
+        pcall(function() Humanoid:AddSetHook("JumpHeight") end)
+        pcall(function() Humanoid:AddSetHook("HipHeight") end)
+        pcall(function() Humanoid:AddSetHook("MaxSlopeAngle") end)
+        pcall(function() workspace:AddSetHook("Gravity") end)
+        if HumanoidRootPart then
+            pcall(function() HumanoidRootPart:AddSetHook("CFrame") end)
+            pcall(function() HumanoidRootPart:AddSetHook("Velocity") end)
+            pcall(function() HumanoidRootPart:AddSetHook("AssemblyLinearVelocity") end)
+        end
+    end
+    
+    if ExecutorCapabilities.hasAddPropertyEmulator then
+        pcall(function() Humanoid:AddPropertyEmulator("WalkSpeed") end)
+        pcall(function() Humanoid:AddPropertyEmulator("JumpPower") end)
+        pcall(function() Humanoid:AddPropertyEmulator("Health") end)
+        pcall(function() Humanoid:AddPropertyEmulator("MaxHealth") end)
+        pcall(function() Humanoid:AddPropertyEmulator("HipHeight") end)
+        pcall(function() workspace:AddPropertyEmulator("Gravity") end)
+        if HumanoidRootPart then
+            pcall(function() HumanoidRootPart:AddPropertyEmulator("Velocity") end)
+            pcall(function() HumanoidRootPart:AddPropertyEmulator("Size") end)
+        end
+    end
+    
+    -- Global Get Hooks (spoof property reads)
+    if ExecutorCapabilities.hasAddGetHook then
+        pcall(function() game:AddGlobalGetHook("WalkSpeed", OriginalWalkSpeed) end)
+        pcall(function() game:AddGlobalGetHook("JumpPower", OriginalJumpPower) end)
+        pcall(function() game:AddGlobalGetHook("Health", OriginalHealth) end)
+        pcall(function() game:AddGlobalGetHook("MaxHealth", OriginalMaxHealth) end)
+        pcall(function() game:AddGlobalGetHook("HipHeight", OriginalHipHeight) end)
+        pcall(function() game:AddGlobalGetHook("Humanoid.Died", false) end)
+        pcall(function() game:AddGlobalGetHook("Gravity", OriginalGravity) end)
+        pcall(function() game:AddGlobalGetHook("Velocity", OriginalVelocity) end)
+    end
+    
+    -- Global Set Hooks (block property writes from anti-cheat)
+    pcall(function()
+        if game.AddGlobalSetHook then
+            game:AddGlobalSetHook("WalkSpeed")
+            game:AddGlobalSetHook("JumpPower")
+            game:AddGlobalSetHook("JumpHeight")
+            game:AddGlobalSetHook("Health")
+            game:AddGlobalSetHook("MaxHealth")
+            game:AddGlobalSetHook("HipHeight")
+            game:AddGlobalSetHook("MaxSlopeAngle")
+            game:AddGlobalSetHook("Gravity")
+            game:AddGlobalSetHook("Velocity")
+            game:AddGlobalSetHook("AssemblyLinearVelocity")
+        end
+    end)
+    
+    -- Block Kick calls
+    pcall(function()
+        if game.AddGlobalCallHook then
+            game:AddGlobalCallHook("Kick", function() end)
+        end
+        if Character and Character.AddCallHook then
+            Character:AddCallHook("BreakJoints", function() return end)
+        end
+        if LocalPlayer.AddCallHook then
+            LocalPlayer:AddCallHook("Kick", function() return task.wait(9e9) end)
+        end
+    end)
+    
+    -- Disable anti-cheat event connections
+    pcall(function()
+        if getconnections then
+            -- Disable ItemChanged connections
+            for _, conn in next, getconnections(game.ItemChanged) do
+                pcall(function() conn:Disable() end)
+            end
+            -- Disable Humanoid.Changed connections
+            if Humanoid then
+                for _, conn in next, getconnections(Humanoid.Changed) do
+                    pcall(function() conn:Disable() end)
+                end
+            end
+            -- Disable LogService.MessageOut connections
+            pcall(function()
+                for _, conn in next, getconnections(game:GetService("LogService").MessageOut) do
+                    conn:Disable()
+                end
+            end)
+            -- Disable ScriptContext.Error connections
+            pcall(function()
+                for _, conn in next, getconnections(game:GetService("ScriptContext").Error) do
+                    conn:Disable()
+                end
+            end)
+        end
+    end)
+    
+    -- Set HttpService timeout (helps with anti-cheat that uses HTTP)
+    pcall(function()
+        game:GetService("HttpService"):SetTimeout(0.05)
+    end)
+    
+    if ANTIBAN_DEBUG then
+        warn("[ANTI-BAN] Enhanced bypass system initialized")
+    end
+end)
+
+-- Re-apply on respawn
+LocalPlayer.CharacterAdded:Connect(function(newChar)
+    task.wait(0.5)
+    pcall(function()
+        local Humanoid = newChar:WaitForChild("Humanoid", 5)
+        local HumanoidRootPart = newChar:WaitForChild("HumanoidRootPart", 5)
+        if not Humanoid or not HumanoidRootPart then return end
+        
+        local OriginalWalkSpeed = Humanoid.WalkSpeed
+        local OriginalJumpPower = Humanoid.JumpPower
+        
+        if ExecutorCapabilities.hasAddSetHook then
+            pcall(function() Humanoid:AddSetHook("WalkSpeed") end)
+            pcall(function() Humanoid:AddSetHook("JumpPower") end)
+            pcall(function() HumanoidRootPart:AddSetHook("CFrame") end)
+            pcall(function() HumanoidRootPart:AddSetHook("Velocity") end)
+        end
+        
+        if ExecutorCapabilities.hasAddPropertyEmulator then
+            pcall(function() Humanoid:AddPropertyEmulator("WalkSpeed") end)
+            pcall(function() Humanoid:AddPropertyEmulator("JumpPower") end)
+            pcall(function() HumanoidRootPart:AddPropertyEmulator("Velocity") end)
+        end
+        
+        -- Disable Humanoid.Changed for new character
+        if getconnections then
+            for _, conn in next, getconnections(Humanoid.Changed) do
+                pcall(function() conn:Disable() end)
+            end
+        end
+        
+        -- Block BreakJoints
+        if newChar.AddCallHook then
+            pcall(function() newChar:AddCallHook("BreakJoints", function() return end) end)
+        end
+    end)
+end)
 
 end
 -- ===== END ADVANCED BYPASS ANTI-CHEAT =====
@@ -1114,6 +1311,19 @@ do
         DRACULA = "Dracula",
         BOMBER_VIS = "BomberVis",
     }
+    
+    -- ===== PERIODIC GARBAGE COLLECTION =====
+    -- PERFORMANCE: Run garbage collection periodically to prevent memory buildup
+    task.defer(function()
+        task.wait(30) -- Initial delay
+        while true do
+            -- Run incremental garbage collection
+            pcall(function()
+                collectgarbage("step", 200)
+            end)
+            task.wait(60) -- Run every 60 seconds
+        end
+    end)
     
 end
 -- ===== END PERFORMANCE OPTIMIZATION SYSTEM =====
@@ -7005,24 +7215,43 @@ do -- // ESP Tab
     local ChamsTransparency = 0.6
     local PerformanceMode = false
     local ChamsMaxDistance = 2000
+    
+    -- PERFORMANCE: Distance culling - don't create ESP for zombies too far away
+    local ESP_CREATION_MAX_DISTANCE = 500 -- Only create ESP for zombies within this distance
+    local ESP_VISIBLE_MAX_DISTANCE = 300 -- Distance at which ESP becomes visible
+    local ESP_SCAN_BATCH_SIZE = 20 -- Max zombies to process per scan cycle
 
     local activeCount = 0
     local scanLoop
     local renderConn
+    
+    -- PERFORMANCE: Cache camera position
+    local cachedCameraPos = Vector3.new(0, 0, 0)
+    local lastCameraCacheTime = 0
 
     local function GetAdorneePart(model)
         if not model or not model:IsA("Model") then return nil end
-        local head = model:FindFirstChild("Head", true)
+        -- PERFORMANCE: Check common parts first without using FindFirstChild with recursive=true
+        local head = model:FindFirstChild("Head")
         if head and head:IsA("BasePart") then return head end
-        local hrp = model:FindFirstChild("HumanoidRootPart", true)
+        local hrp = model:FindFirstChild("HumanoidRootPart")
         if hrp and hrp:IsA("BasePart") then return hrp end
         if model.PrimaryPart and model.PrimaryPart:IsA("BasePart") then return model.PrimaryPart end
+        -- PERFORMANCE: Use GetChildren instead of GetDescendants (much faster)
         local children = model:GetChildren()
-        local possible = children[12]
-        if possible and possible:IsA("BasePart") then return possible end
-        for _, p in ipairs(model:GetDescendants()) do
+        for _, p in ipairs(children) do
             if p:IsA("BasePart") and p.Name ~= "Whale Oil Lantern" then
                 return p
+            end
+        end
+        -- Fallback: check first-level folders only
+        for _, child in ipairs(children) do
+            if child:IsA("Folder") or child:IsA("Model") then
+                for _, p in ipairs(child:GetChildren()) do
+                    if p:IsA("BasePart") and p.Name ~= "Whale Oil Lantern" then
+                        return p
+                    end
+                end
             end
         end
         return nil
@@ -7213,6 +7442,10 @@ end
             zombieSet[z] = true
         end
         
+        -- PERFORMANCE: Get camera position for distance culling
+        local cam = workspace.CurrentCamera
+        local camPos = cam and cam.CFrame.Position or Vector3.new(0, 0, 0)
+        
         for espType, enabled in pairs(EnabledESPs) do
             if enabled then
                 -- Remove visuals for zombies that no longer exist
@@ -7222,9 +7455,21 @@ end
                     end
                 end
                 
+                -- PERFORMANCE: Limit how many new visuals we create per scan cycle
+                local created = 0
+                
                 -- Add visuals for new zombies that match this type
                 for _, z in ipairs(zombies) do
+                    if created >= ESP_SCAN_BATCH_SIZE then break end -- PERFORMANCE: Batch limit
+                    
                     if z:IsA("Model") and not ESPData[espType][z] then
+                        -- PERFORMANCE: Distance culling - skip zombies too far away
+                        local zombiePart = z.PrimaryPart or z:FindFirstChild("HumanoidRootPart") or z:FindFirstChild("Head")
+                        if zombiePart then
+                            local dist = (camPos - zombiePart.Position).Magnitude
+                            if dist > ESP_CREATION_MAX_DISTANCE then continue end -- Skip distant zombies
+                        end
+                        
                         -- Check if zombie already has ESP from another type
                         local hasOtherESP = false
                         for otherType, otherData in pairs(ESPData) do
@@ -7236,6 +7481,7 @@ end
                         
                         if not hasOtherESP and ESPConfigs[espType].match(z) then
                             CreateVisual(espType, z)
+                            created = created + 1
                         end
                     end
                 end
@@ -7358,10 +7604,11 @@ end
             ScanAll()
             scanLoop = task.spawn(function()
                 local cleanupCounter = 0
+                local gcCounter = 0
                 while activeCount > 0 do
                     ScanAll()
                     
-                    -- Periodic cleanup every 10 scan cycles (5 seconds)
+                    -- Periodic cleanup every 10 scan cycles (~10 seconds)
                     cleanupCounter = cleanupCounter + 1
                     if cleanupCounter >= 10 then
                         cleanupCounter = 0
@@ -7385,12 +7632,19 @@ end
                         end
                     end
                     
-                    task.wait(0.75) -- Reduced scan frequency for better performance
+                    -- PERFORMANCE: Trigger garbage collection every 60 scan cycles (~60 seconds)
+                    gcCounter = gcCounter + 1
+                    if gcCounter >= 60 then
+                        gcCounter = 0
+                        pcall(function() collectgarbage("step", 100) end)
+                    end
+                    
+                    task.wait(1.0) -- PERFORMANCE: Increased scan interval to 1 second
                 end
             end)
             -- PERFORMANCE: Use Heartbeat with increased throttle interval
             local lastUpdate = 0
-            local UPDATE_INTERVAL = 0.15 -- Only update every 0.15 seconds
+            local UPDATE_INTERVAL = 0.2 -- PERFORMANCE: Update every 0.2 seconds (5 FPS for ESP)
             renderConn = RunService.Heartbeat:Connect(function()
                 -- PERFORMANCE: Mark ESP as active
                 if _G.KatchiPerf then _G.KatchiPerf.markActive("ESP") end
@@ -7398,6 +7652,14 @@ end
                 local now = tick()
                 if now - lastUpdate < UPDATE_INTERVAL then return end
                 lastUpdate = now
+                
+                -- PERFORMANCE: Update cached camera position
+                local cam = workspace.CurrentCamera
+                if cam then
+                    cachedCameraPos = cam.CFrame.Position
+                    lastCameraCacheTime = now
+                end
+                
                 UpdateAllBillboards()
             end)
         end
@@ -11697,9 +11959,20 @@ do -- // Players Tab
         end
     end
 
+    -- PERFORMANCE: Throttle Player ESP updates
+    local playerESPLastUpdate = 0
+    local PLAYER_ESP_UPDATE_INTERVAL = 0.15 -- Update every 0.15 seconds
+    
     task.defer(function()
         task.wait(1) -- Stagger start
-        RunService.Heartbeat:Connect(UpdateESPLoop)
+        RunService.Heartbeat:Connect(function()
+            -- PERFORMANCE: Throttle updates
+            local now = tick()
+            if now - playerESPLastUpdate < PLAYER_ESP_UPDATE_INTERVAL then return end
+            playerESPLastUpdate = now
+            
+            UpdateESPLoop()
+        end)
     end)
 
     Players.PlayerRemoving:Connect(RemovePlayerESP)
@@ -13020,57 +13293,102 @@ local function ApplyAllSettings(settings)
     end
 end
 
--- Save config to file
+-- Save config to file + WindUI ConfigManager
 local function SaveConfig(name)
     if not name or name == "" then return false, "No name" end
     name = name:gsub("[^%w%-%_]", "")
     if name == "" then return false, "Invalid name" end
     
+    -- 1. Save custom settings to JSON file
     local settings = CollectAllSettings()
     local jsonStr = nil
     pcall(function()
         jsonStr = game:GetService("HttpService"):JSONEncode(settings)
     end)
     
-    if not jsonStr then return false, "Failed to encode" end
-    
-    local path = GetConfigPath(name)
-    local success = SafeWriteFile(path, jsonStr)
-    
-    if success then
-        return true, "Saved"
+    local fileSuccess = false
+    if jsonStr then
+        local path = GetConfigPath(name)
+        fileSuccess = SafeWriteFile(path, jsonStr)
     end
-    return false, "Failed to write file"
+    
+    -- 2. Also save via WindUI ConfigManager (saves flagged UI elements)
+    local windUISuccess = false
+    pcall(function()
+        local ConfigManager = Window and Window.ConfigManager
+        if ConfigManager then
+            local cfg = ConfigManager:CreateConfig(name)
+            if cfg and cfg.Save then
+                cfg:Save()
+                windUISuccess = true
+            end
+        end
+    end)
+    
+    if fileSuccess or windUISuccess then
+        return true, fileSuccess and "Saved" or "WindUI only"
+    end
+    return false, "Failed to save"
 end
 
--- Load config from file
+-- Load config from file + WindUI ConfigManager
 local function LoadConfig(name)
     if not name or name == "" then return false, "No name" end
     
+    local fileLoaded = false
+    local windUILoaded = false
+    
+    -- 1. Try loading from JSON file (custom settings)
     local path = GetConfigPath(name)
-    if not SafeIsFile(path) then
-        return false, "Config not found"
+    if SafeIsFile(path) then
+        local content = SafeReadFile(path)
+        if content then
+            local settings = nil
+            pcall(function()
+                settings = game:GetService("HttpService"):JSONDecode(content)
+            end)
+            if settings then
+                ApplyAllSettings(settings)
+                fileLoaded = true
+            end
+        end
     end
     
-    local content = SafeReadFile(path)
-    if not content then return false, "Failed to read file" end
-    
-    local settings = nil
+    -- 2. Also load via WindUI ConfigManager (loads flagged UI elements)
     pcall(function()
-        settings = game:GetService("HttpService"):JSONDecode(content)
+        local ConfigManager = Window and Window.ConfigManager
+        if ConfigManager then
+            local cfg = ConfigManager:CreateConfig(name)
+            if cfg and cfg.Load then
+                cfg:Load()
+                windUILoaded = true
+            end
+        end
     end)
     
-    if not settings then return false, "Failed to decode" end
-    
-    ApplyAllSettings(settings)
-    return true, "Loaded"
+    if fileLoaded or windUILoaded then
+        return true, fileLoaded and "Loaded" or "WindUI only"
+    end
+    return false, "Config not found"
 end
 
 -- Delete config
 local function DeleteConfig(name)
     if not name or name == "" then return false end
+    
+    -- Delete JSON file
     local path = GetConfigPath(name)
     SafeDelFile(path)
+    
+    -- Also delete via WindUI ConfigManager
+    pcall(function()
+        local ConfigManager = Window and Window.ConfigManager
+        if ConfigManager then
+            local cfg = ConfigManager:CreateConfig(name)
+            if cfg and cfg.Delete then cfg:Delete() end
+        end
+    end)
+    
     return true
 end
 
@@ -13093,14 +13411,35 @@ end
 
 local function GetAllConfigsSafe()
     local configs = {}
-    -- Scan folder for saved configs
+    local seen = {}
+    
+    -- 1. Scan folder for saved configs (JSON files)
     local files = SafeListFiles(KATCHI_CONFIG_FOLDER)
     for _, path in ipairs(files) do
         local name = path:match(KATCHI_CONFIG_PREFIX .. "(.+)%.json$")
-        if name then
+        if name and not seen[name] then
             table.insert(configs, name)
+            seen[name] = true
         end
     end
+    
+    -- 2. Also check WindUI ConfigManager
+    pcall(function()
+        local ConfigManager = Window and Window.ConfigManager
+        if ConfigManager and ConfigManager.AllConfigs then
+            local list = ConfigManager:AllConfigs()
+            if type(list) == "table" then
+                for _, v in ipairs(list) do
+                    local n = tostring(v)
+                    if not seen[n] then
+                        table.insert(configs, n)
+                        seen[n] = true
+                    end
+                end
+            end
+        end
+    end)
+    
     return configs
 end
 
