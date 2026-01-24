@@ -8367,11 +8367,37 @@ local function KillAura_performKillAura(hrp)
         end
     end
 
-    -- Auto-look (simplified)
+    -- Auto-look (character rotation only - works with walking AND flying)
     if KillAuraAutoLook and firstTarget and firstTarget.head and firstTarget.head.Parent then
-        local targetPos = firstTarget.head.Position
-        local lookAt = Vector3.new(targetPos.X, hrpPos.Y, targetPos.Z)
-        hrp.CFrame = CFrame.new(hrpPos, lookAt)
+        pcall(function()
+            local targetPos = firstTarget.head.Position
+            -- Calculate look direction (Y-axis only - horizontal rotation)
+            local lookAt = Vector3.new(targetPos.X, hrpPos.Y, targetPos.Z)
+            local direction = (lookAt - hrpPos)
+            
+            if direction.Magnitude > 0.1 then
+                direction = direction.Unit
+                
+                -- Check if flying (BodyVelocity exists)
+                local bodyVel = hrp:FindFirstChildOfClass("BodyVelocity")
+                local bodyGyro = hrp:FindFirstChildOfClass("BodyGyro")
+                
+                if bodyGyro then
+                    -- Flying mode: use BodyGyro to rotate (doesn't interrupt fly)
+                    bodyGyro.CFrame = CFrame.lookAt(hrpPos, hrpPos + direction)
+                elseif bodyVel then
+                    -- Has BodyVelocity but no gyro - just set CFrame with preserved velocity
+                    local savedVel = bodyVel.Velocity
+                    hrp.CFrame = CFrame.lookAt(hrpPos, hrpPos + direction)
+                    bodyVel.Velocity = savedVel
+                else
+                    -- Normal walking: preserve velocity and set CFrame
+                    local currentVelocity = hrp.AssemblyLinearVelocity
+                    hrp.CFrame = CFrame.lookAt(hrpPos, hrpPos + direction)
+                    hrp.AssemblyLinearVelocity = currentVelocity
+                end
+            end
+        end)
     end
 end
 
@@ -12649,8 +12675,9 @@ end -- end of Headless Horseman Tab
 
 task.wait(0.1) -- Delay to prevent lag
 do -- // Configs & Theme Tab
-    -- ====== Universal Config System (compatible with all executors including Arceus X) ======
-    -- Uses writefile/readfile with workspace folder for maximum compatibility
+    -- ====== WindUI Built-in Config System ======
+    -- Uses WindUI's Flag-based auto-save/load system
+    -- All UI elements with Flag="..." are automatically saved
     
     local skibiTab = Others1Section:Tab({
         Title = "Profiles",
@@ -12658,43 +12685,22 @@ do -- // Configs & Theme Tab
         Locked = false,
     })
 
--- ===== UNIVERSAL FILE SYSTEM FOR ALL EXECUTORS =====
+-- ===== WINDUI CONFIG SYSTEM =====
+-- WindUI automatically saves/loads based on Flags set on UI elements
+-- This simplified system just provides manual save/load buttons
+
 local KATCHI_CONFIG_FOLDER = "KatchiHub"
 local KATCHI_CONFIG_PREFIX = "KatchiConfig_"
-local KATCHI_BACKUP_SUFFIX = ".backup" -- Backup file suffix
-local CONFIG_VERSION = 1 -- Increment this if config format changes
 
--- Check what file functions are available
-local hasWriteFile = type(writefile) == "function"
-local hasReadFile = type(readfile) == "function"
-local hasListFiles = type(listfiles) == "function"
-local hasIsFile = type(isfile) == "function"
-local hasDelFile = type(delfile) == "function"
-local hasMakeFolder = type(makefolder) == "function"
-
--- Fallback: Some executors use different function names
-if not hasWriteFile then
-    pcall(function() hasWriteFile = type(writefile) == "function" or type(syn and syn.writefile) == "function" end)
-end
-if not hasReadFile then
-    pcall(function() hasReadFile = type(readfile) == "function" or type(syn and syn.readfile) == "function" end)
-end
-
--- Wrapper functions for cross-executor compatibility
+-- Simple file wrappers
 local function SafeWriteFile(path, content)
     local success = false
-    -- Try standard writefile
     pcall(function()
-        writefile(path, content)
-        success = true
+        if writefile then writefile(path, content); success = true end
     end)
-    -- Try syn.writefile (Synapse)
     if not success then
         pcall(function()
-            if syn and syn.writefile then
-                syn.writefile(path, content)
-                success = true
-            end
+            if syn and syn.writefile then syn.writefile(path, content); success = true end
         end)
     end
     return success
@@ -12702,235 +12708,37 @@ end
 
 local function SafeReadFile(path)
     local content = nil
-    -- Try standard readfile
-    pcall(function()
-        content = readfile(path)
-    end)
-    -- Try syn.readfile (Synapse)
+    pcall(function() if readfile then content = readfile(path) end end)
     if not content then
-        pcall(function()
-            if syn and syn.readfile then
-                content = syn.readfile(path)
-            end
-        end)
+        pcall(function() if syn and syn.readfile then content = syn.readfile(path) end end)
     end
     return content
 end
 
-local function SafeIsFile(path)
-    local exists = false
-    pcall(function()
-        if isfile then
-            exists = isfile(path)
-        else
-            -- Fallback: try to read and see if it works
-            local content = SafeReadFile(path)
-            exists = content ~= nil
-        end
-    end)
-    return exists
-end
-
-local function SafeDelFile(path)
-    local success = false
-    pcall(function()
-        if delfile then
-            delfile(path)
-            success = true
-        end
-    end)
-    return success
-end
-
-local function SafeMakeFolder(path)
-    local success = false
-    pcall(function()
-        if makefolder then
-            makefolder(path)
-            success = true
-        end
-    end)
-    return success
-end
-
 local function SafeListFiles(folder)
     local files = {}
-    pcall(function()
-        if listfiles then
-            files = listfiles(folder)
-        end
-    end)
+    pcall(function() if listfiles then files = listfiles(folder) end end)
     return files
 end
 
--- ===== CONFIG INTEGRITY SYSTEM =====
--- Validates JSON before writing and creates backups
-
--- Calculate simple checksum for data integrity
-local function calculateChecksum(str)
-    local sum = 0
-    for i = 1, #str do
-        sum = (sum + string.byte(str, i) * i) % 2147483647
-    end
-    return sum
+local function SafeDelFile(path)
+    pcall(function() if delfile then delfile(path) end end)
 end
 
--- Validate that a string is valid JSON and can be decoded
-local function isValidJSON(str)
-    if type(str) ~= "string" or str == "" then return false end
-    local success, result = pcall(function()
-        return HttpService:JSONDecode(str)
-    end)
-    return success and type(result) == "table"
+local function SafeMakeFolder(path)
+    pcall(function() if makefolder then makefolder(path) end end)
 end
 
--- Safe atomic write: writes to temp file first, then renames (prevents partial writes)
-local function SafeAtomicWrite(path, content)
-    -- Validate content is proper JSON before writing
-    if not isValidJSON(content) then
-        return false, "Invalid JSON content"
-    end
-    
-    -- Create backup of existing file first
-    if SafeIsFile(path) then
-        local existingContent = SafeReadFile(path)
-        if existingContent and isValidJSON(existingContent) then
-            SafeWriteFile(path .. KATCHI_BACKUP_SUFFIX, existingContent)
-        end
-    end
-    
-    -- Write new content
-    local success = SafeWriteFile(path, content)
-    if not success then
-        return false, "Write failed"
-    end
-    
-    -- Verify the write by reading back
-    local verification = SafeReadFile(path)
-    if verification ~= content then
-        -- Write failed - try to restore backup
-        local backup = SafeReadFile(path .. KATCHI_BACKUP_SUFFIX)
-        if backup then
-            SafeWriteFile(path, backup)
-        end
-        return false, "Write verification failed"
-    end
-    
-    return true, "Success"
-end
+-- Ensure folder exists
+SafeMakeFolder(KATCHI_CONFIG_FOLDER)
 
--- Safe read with fallback to backup
-local function SafeAtomicRead(path)
-    local content = SafeReadFile(path)
-    
-    -- Check if content is valid JSON
-    if content and isValidJSON(content) then
-        return content, "Success"
-    end
-    
-    -- Primary file is corrupted - try backup
-    local backupPath = path .. KATCHI_BACKUP_SUFFIX
-    local backupContent = SafeReadFile(backupPath)
-    
-    if backupContent and isValidJSON(backupContent) then
-        -- Restore from backup
-        SafeWriteFile(path, backupContent)
-        return backupContent, "Restored from backup"
-    end
-    
-    return nil, "File corrupted and no valid backup found"
-end
-
--- Ensure config folder exists
-pcall(function() SafeMakeFolder(KATCHI_CONFIG_FOLDER) end)
-
--- Get config file path
 local function GetConfigPath(name)
     return KATCHI_CONFIG_FOLDER .. "/" .. KATCHI_CONFIG_PREFIX .. tostring(name) .. ".json"
 end
 
--- Universal config storage (collect all toggle states)
-local function CollectCurrentConfig()
-    local config = {}
-    
-    -- Collect all toggle states from global registry
-    if _G.KatchiToggleElements then
-        for name, toggle in pairs(_G.KatchiToggleElements) do
-            pcall(function()
-                if toggle and toggle.GetValue then
-                    config[name] = toggle:GetValue()
-                elseif toggle and toggle.Value ~= nil then
-                    config[name] = toggle.Value
-                end
-            end)
-        end
-    end
-    
-    -- Collect global state variables
-    pcall(function() config.KillAuraEnabled = KillAuraEnabled end)
-    pcall(function() config.KillAuraRange = KillAuraRange end)
-    pcall(function() config.KillAuraSpeedMode = KillAuraSpeedMode end)
-    pcall(function() config.HeadHitEnabled = HeadHitEnabled end)
-    pcall(function() config.hitboxEnabled = hitboxEnabled end)
-    pcall(function() config.hitboxSize = hitboxSize end)
-    pcall(function() config.AntiGrabEnabled = AntiGrabEnabled end)
-    pcall(function() config.ShoveAuraEnabled = ShoveAuraEnabled end)
-    pcall(function() config.ShoveHitboxExpanderEnabled = ShoveHitboxExpanderEnabled end)
-    pcall(function() config.USER_AUTO_SHOOT_TOGGLE = USER_AUTO_SHOOT_TOGGLE end)
-    pcall(function() config.AUTO_SAVE_PLAYERS_ENABLED = AUTO_SAVE_PLAYERS_ENABLED end)
-    pcall(function() config.SILENT_AIM_ENABLED = SILENT_AIM_ENABLED end)
-    pcall(function() config.AutoRemoveHorsesEnabled = AutoRemoveHorsesEnabled end)
-    pcall(function() config.USE_FOV = USE_FOV end)
-    pcall(function() config.SHOW_FOV = SHOW_FOV end)
-    
-    return config
-end
-
--- Apply loaded config
-local function ApplyConfig(config)
-    if type(config) ~= "table" then return false end
-    
-    -- Apply to toggle elements
-    if _G.KatchiToggleElements then
-        for name, value in pairs(config) do
-            pcall(function()
-                local toggle = _G.KatchiToggleElements[name]
-                if toggle then
-                    if toggle.SetValue then
-                        toggle:SetValue(value)
-                    elseif toggle.Set then
-                        toggle:Set(value)
-                    end
-                end
-            end)
-        end
-    end
-    
-    -- Apply global variables
-    pcall(function() if config.KillAuraEnabled ~= nil then KillAuraEnabled = config.KillAuraEnabled end end)
-    pcall(function() if config.KillAuraRange ~= nil then KillAuraRange = config.KillAuraRange end end)
-    pcall(function() if config.KillAuraSpeedMode ~= nil then KillAuraSpeedMode = config.KillAuraSpeedMode end end)
-    pcall(function() if config.HeadHitEnabled ~= nil then HeadHitEnabled = config.HeadHitEnabled end end)
-    pcall(function() if config.hitboxEnabled ~= nil then hitboxEnabled = config.hitboxEnabled end end)
-    pcall(function() if config.hitboxSize ~= nil then hitboxSize = config.hitboxSize end end)
-    pcall(function() if config.AntiGrabEnabled ~= nil then AntiGrabEnabled = config.AntiGrabEnabled end end)
-    pcall(function() if config.ShoveAuraEnabled ~= nil then ShoveAuraEnabled = config.ShoveAuraEnabled end end)
-    pcall(function() if config.ShoveHitboxExpanderEnabled ~= nil then ShoveHitboxExpanderEnabled = config.ShoveHitboxExpanderEnabled end end)
-    pcall(function() if config.USER_AUTO_SHOOT_TOGGLE ~= nil then USER_AUTO_SHOOT_TOGGLE = config.USER_AUTO_SHOOT_TOGGLE end end)
-    pcall(function() if config.AUTO_SAVE_PLAYERS_ENABLED ~= nil then AUTO_SAVE_PLAYERS_ENABLED = config.AUTO_SAVE_PLAYERS_ENABLED end end)
-    pcall(function() if config.SILENT_AIM_ENABLED ~= nil then SILENT_AIM_ENABLED = config.SILENT_AIM_ENABLED end end)
-    pcall(function() if config.AutoRemoveHorsesEnabled ~= nil then AutoRemoveHorsesEnabled = config.AutoRemoveHorsesEnabled end end)
-    pcall(function() if config.USE_FOV ~= nil then USE_FOV = config.USE_FOV end end)
-    pcall(function() if config.SHOW_FOV ~= nil then SHOW_FOV = config.SHOW_FOV end end)
-    
-    return true
-end
-
--- Get all saved config names (universal)
-local function GetAllUniversalConfigs()
+-- Get all saved configs
+local function GetAllConfigs()
     local configs = {}
-    
-    -- Method 1: Use listfiles if available
     local files = SafeListFiles(KATCHI_CONFIG_FOLDER)
     for _, path in ipairs(files) do
         local name = path:match(KATCHI_CONFIG_PREFIX .. "(.+)%.json$")
@@ -12938,9 +12746,88 @@ local function GetAllUniversalConfigs()
             table.insert(configs, name)
         end
     end
+    return configs
+end
+
+-- Save current config using WindUI's built-in system
+local function SaveConfig(name)
+    if not name or name == "" then return false, "No name" end
+    name = name:gsub("[^%w%-%_]", "")
+    if name == "" then return false, "Invalid name" end
     
-    -- Method 2: Also try WindUI's ConfigManager as fallback
-    if #configs == 0 and Window and Window.ConfigManager then
+    -- Use WindUI's built-in save if available
+    local saved = false
+    if Window and Window.ConfigManager then
+        pcall(function()
+            -- WindUI saves all flagged elements automatically
+            local cfg = Window.ConfigManager:CreateConfig(name)
+            if cfg and cfg.Save then
+                cfg:Save()
+                saved = true
+            end
+        end)
+    end
+    
+    if saved then
+        return true, "Saved"
+    end
+    return false, "ConfigManager not available"
+end
+
+-- Load config using WindUI's built-in system
+local function LoadConfig(name)
+    if not name or name == "" then return false, "No name" end
+    
+    local loaded = false
+    if Window and Window.ConfigManager then
+        pcall(function()
+            local cfg = Window.ConfigManager:CreateConfig(name)
+            if cfg and cfg.Load then
+                cfg:Load()
+                loaded = true
+            end
+        end)
+    end
+    
+    if loaded then
+        return true, "Loaded"
+    end
+    return false, "Config not found"
+end
+
+-- Delete config
+local function DeleteConfig(name)
+    if not name or name == "" then return false end
+    pcall(function()
+        if Window and Window.ConfigManager then
+            local cfg = Window.ConfigManager:CreateConfig(name)
+            if cfg and cfg.Delete then cfg:Delete() end
+        end
+    end)
+    return true
+end
+
+-- ===== UI SECTION =====
+local ConfigSection = skibiTab:Section({
+    Title = "Configs",
+    Icon = "file-plus",
+    Opened = true
+})
+
+local profileName = "default"
+local selectedProfile = nil
+local ConfigDropdown = nil
+
+local function notify(title, content, icon, dur)
+    if WindUI then
+        pcall(function() WindUI:Notify({ Title = title or "Config", Content = content or "", Icon = icon or "save", Duration = dur or 2 }) end)
+    end
+end
+
+local function GetAllConfigsSafe()
+    local configs = {}
+    -- Use WindUI's ConfigManager to get all configs
+    if Window and Window.ConfigManager and Window.ConfigManager.AllConfigs then
         pcall(function()
             local list = Window.ConfigManager:AllConfigs()
             if type(list) == "table" then
@@ -12950,192 +12837,17 @@ local function GetAllUniversalConfigs()
             end
         end)
     end
-    
+    -- Fallback: scan folder
+    if #configs == 0 then
+        local files = SafeListFiles(KATCHI_CONFIG_FOLDER)
+        for _, path in ipairs(files) do
+            local name = path:match(KATCHI_CONFIG_PREFIX .. "(.+)%.json$")
+            if name then
+                table.insert(configs, name)
+            end
+        end
+    end
     return configs
-end
-
--- Save config (universal) - WITH BACKUP AND INTEGRITY CHECK
-local function SaveUniversalConfig(name)
-    if not name or name == "" then return false, "No name provided" end
-    
-    -- Sanitize name (remove special characters that could break file paths)
-    name = name:gsub("[^%w%-%_]", "")
-    if name == "" then return false, "Invalid name (use only letters, numbers, - and _)" end
-    
-    local config = CollectCurrentConfig()
-    
-    -- Add metadata for versioning and integrity
-    config._version = CONFIG_VERSION
-    config._timestamp = os.time()
-    config._checksum = nil -- Will be set after encoding
-    
-    local json = nil
-    local encodeSuccess = pcall(function()
-        json = HttpService:JSONEncode(config)
-    end)
-    
-    if not encodeSuccess or not json then 
-        return false, "Failed to encode config" 
-    end
-    
-    -- Add checksum to detect corruption
-    local checksum = calculateChecksum(json)
-    
-    -- Re-encode with checksum
-    config._checksum = checksum
-    pcall(function()
-        json = HttpService:JSONEncode(config)
-    end)
-    
-    if not json then return false, "Failed to encode config with checksum" end
-    
-    -- Use atomic write with backup
-    local path = GetConfigPath(name)
-    local success, msg = SafeAtomicWrite(path, json)
-    
-    if success then
-        return true, "Saved successfully (with backup)"
-    end
-    
-    -- Fallback: Try WindUI's ConfigManager
-    if Window and Window.ConfigManager then
-        local ok = false
-        pcall(function()
-            local cfg = Window.ConfigManager:CreateConfig(name)
-            if cfg then
-                cfg:Save()
-                ok = true
-            end
-        end)
-        if ok then return true, "Saved via ConfigManager" end
-    end
-    
-    return false, msg or "File system not available"
-end
-
--- Load config (universal) - WITH BACKUP RECOVERY
-local function LoadUniversalConfig(name)
-    if not name or name == "" then return false, "No name provided" end
-    
-    -- Try file system first with backup recovery
-    local path = GetConfigPath(name)
-    local content, readMsg = SafeAtomicRead(path)
-    
-    if content then
-        local config = nil
-        local decodeSuccess = pcall(function()
-            config = HttpService:JSONDecode(content)
-        end)
-        
-        if decodeSuccess and config and type(config) == "table" then
-            -- Verify checksum if present
-            if config._checksum then
-                local storedChecksum = config._checksum
-                config._checksum = nil
-                local reencoded = nil
-                pcall(function() reencoded = HttpService:JSONEncode(config) end)
-                
-                -- Note: Checksum verification is informational only
-                -- We still load the config even if checksum mismatches
-                -- because partial data is better than no data
-            end
-            
-            ApplyConfig(config)
-            
-            -- Indicate if we recovered from backup
-            if readMsg == "Restored from backup" then
-                return true, "Loaded from backup (original was corrupted)"
-            end
-            return true, "Loaded successfully"
-        else
-            return false, "Config file is corrupted"
-        end
-    end
-    
-    -- Fallback: Try WindUI's ConfigManager
-    if Window and Window.ConfigManager then
-        local ok = false
-        pcall(function()
-            local cfg = Window.ConfigManager:CreateConfig(name)
-            if cfg then
-                cfg:Load()
-                ok = true
-            end
-        end)
-        if ok then return true, "Loaded via ConfigManager" end
-    end
-    
-    return false, readMsg or "Config not found"
-end
-
--- Delete config (universal) - Also deletes backup
-local function DeleteUniversalConfig(name)
-    if not name or name == "" then return false end
-    
-    local path = GetConfigPath(name)
-    SafeDelFile(path)
-    SafeDelFile(path .. KATCHI_BACKUP_SUFFIX) -- Also delete backup
-    
-    -- Also try WindUI's ConfigManager
-    pcall(function()
-        if Window and Window.ConfigManager then
-            local cfg = Window.ConfigManager:CreateConfig(name)
-            if cfg then cfg:Delete() end
-        end
-    end)
-    
-    return true
-end
-
--- Repair corrupted config from backup
-local function RepairConfig(name)
-    if not name or name == "" then return false, "No name provided" end
-    
-    local path = GetConfigPath(name)
-    local backupPath = path .. KATCHI_BACKUP_SUFFIX
-    
-    -- Check if backup exists and is valid
-    local backupContent = SafeReadFile(backupPath)
-    if not backupContent then
-        return false, "No backup file found"
-    end
-    
-    if not isValidJSON(backupContent) then
-        return false, "Backup file is also corrupted"
-    end
-    
-    -- Restore from backup
-    local success = SafeWriteFile(path, backupContent)
-    if success then
-        return true, "Config restored from backup"
-    end
-    
-    return false, "Failed to restore from backup"
-end
-
--- ===== UI SECTION =====
-local ConfigManager = Window and Window.ConfigManager or nil
-local ConfigSection = skibiTab:Section({
-    Title = "Configs (Universal)",
-    Icon = "file-plus",
-    Opened = true
-})
-
-local profileName = "default"
-local selectedProfile = nil
-local ConfigDropdown = nil
-local overwriteExisting = true
-
-local function notify(title, content, icon, dur)
-    if WindUI then
-        pcall(function() WindUI:Notify({ Title = title or "Config", Content = content or "", Icon = icon or "save", Duration = dur or 2 }) end)
-    else
-        pcall(function() print(("[%s] %s"):format(title or "Config", content or "")) end)
-    end
-end
-
-local function GetAllConfigsSafe()
-    return GetAllUniversalConfigs()
 end
 
 local function RefreshConfigsDropdown()
@@ -13145,52 +12857,23 @@ local function RefreshConfigsDropdown()
     local newValue = selectedProfile or list[1] or ""
 
     if ConfigDropdown then
-        local success = pcall(function()
-            -- Try multiple update methods for different executor compatibility
+        pcall(function()
             if ConfigDropdown.SetValues then 
                 ConfigDropdown:SetValues(list)
-                ConfigDropdown.Value = newValue
-                return true
-            end
-            
-            if ConfigDropdown.SetOptions then 
+            elseif ConfigDropdown.SetOptions then 
                 ConfigDropdown:SetOptions(list)
-                ConfigDropdown.Value = newValue
-                return true
             end
-            
-            if ConfigDropdown.Update then 
-                ConfigDropdown:Update(list)
-                ConfigDropdown.Value = newValue
-                return true
-            end
-            
-            if ConfigDropdown.Refresh then 
-                ConfigDropdown:Refresh(list)
-                ConfigDropdown.Value = newValue
-                return true
-            end
-            
-            -- Final fallback: Direct property manipulation
-            ConfigDropdown.Values = list
-            ConfigDropdown.Value = newValue
-            
-            -- Try to force UI update
             if ConfigDropdown.SetValue then
                 ConfigDropdown:SetValue(newValue)
             end
         end)
-        
-        if not success then
-            notify("Config", "Dropdown refresh failed, try manual refresh", "alert-triangle", 2)
-        end
     end
 end
 
 -- textbox for entering profile name
 ConfigSection:Input({
     Title = "Profile Name",
-    Desc = "Enter a name for the config (saves to workspace/KatchiHub folder)",
+    Desc = "Enter a name for the config",
     Placeholder = "default",
     Callback = function(val)
         if val and tostring(val):match("%S") then
@@ -13199,36 +12882,18 @@ ConfigSection:Input({
     end
 })
 
--- Toggle for overwrite option
-ConfigSection:Toggle({
-    Title = "Allow Overwrite",
-    Desc = "If enabled, saving will overwrite existing profiles",
-    Default = true,
-    Callback = function(state)
-        overwriteExisting = state
-    end
-})
-
--- Save button (Universal - works on all executors)
+-- Save button
 ConfigSection:Button({
     Title = "Save Profile",
-    Desc = "Save Config to workspace (works on Arceus X, Fluxus, etc.)",
+    Desc = "Save all current settings to a profile",
     Callback = function()
         local name = tostring(profileName or ""):gsub("^%s+", ""):gsub("%s+$", "")
         if name == "" then notify("Config", "Enter a profile name first", "alert-circle", 2); return end
 
-        local existing = GetAllConfigsSafe()
-        local exists = table.find(existing, name) ~= nil
-
-        if exists and not overwriteExisting then
-            notify("Config", ("Profile '%s' already exists. Enable Overwrite to replace it."):format(name), "alert-circle", 2)
-            return
-        end
-
-        -- Use universal save system
-        local success, msg = SaveUniversalConfig(name)
+        -- Use WindUI's built-in config system
+        local success, msg = SaveConfig(name)
         if success then
-            notify("Config", ("Saved '%s' (%s)"):format(name, msg or ""), "check", 2)
+            notify("Config", ("Saved '%s'"):format(name), "check", 2)
             selectedProfile = name
             task.wait(0.1)
             RefreshConfigsDropdown()
@@ -13256,9 +12921,9 @@ ConfigSection:Button({
     Callback = function()
         if not selectedProfile or tostring(selectedProfile) == "" then notify("Config", "Select a profile first", "alert-circle", 2); return end
         
-        local success, msg = LoadUniversalConfig(selectedProfile)
+        local success, msg = LoadConfig(selectedProfile)
         if success then
-            notify("Config", ("Loaded '%s' (%s)"):format(selectedProfile, msg or ""), "download", 2)
+            notify("Config", ("Loaded '%s'"):format(selectedProfile), "download", 2)
             RefreshConfigsDropdown()
         else
             notify("Config", ("Failed to load '%s': %s"):format(selectedProfile, msg or "Not found"), "x", 2)
@@ -13273,32 +12938,13 @@ ConfigSection:Button({
     Callback = function()
         if not selectedProfile or tostring(selectedProfile) == "" then notify("Config", "Select a profile first", "alert-circle", 2); return end
         
-        local success = DeleteUniversalConfig(selectedProfile)
+        local success = DeleteConfig(selectedProfile)
         if success then
             notify("Config", ("Deleted '%s'"):format(selectedProfile), "trash", 2)
             selectedProfile = nil
             RefreshConfigsDropdown()
         else
             notify("Config", ("Failed to delete '%s'"):format(selectedProfile), "x", 2)
-        end
-    end
-})
-
--- Repair button (restore from backup)
-ConfigSection:Button({
-    Title = "Repair Selected",
-    Desc = "Restore selected Config from backup if corrupted",
-    Callback = function()
-        if not selectedProfile or tostring(selectedProfile) == "" then 
-            notify("Config", "Select a profile first", "alert-circle", 2)
-            return 
-        end
-        
-        local success, msg = RepairConfig(selectedProfile)
-        if success then
-            notify("Config", ("Repaired '%s': %s"):format(selectedProfile, msg or ""), "wrench", 2)
-        else
-            notify("Config", ("Cannot repair '%s': %s"):format(selectedProfile, msg or "No backup"), "x", 2)
         end
     end
 })
