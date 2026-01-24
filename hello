@@ -83,13 +83,15 @@ if ANTIBAN_DEBUG then
     warn("[ANTI-BAN] Advanced Hooks Available: " .. tostring(ExecutorCapabilities.hasAddGetHook or ExecutorCapabilities.hasAddSetHook))
 end
 
--- ===== 1. STEALTH GUI PROTECTION (Enhanced v2) =====
+-- ===== 1. ADVANCED STEALTH GUI PROTECTION (Enhanced v3) =====
+-- Multi-layer protection system with instance cloaking, hook-based hiding, and deep protection
+
 -- Comprehensive list of names that look like legitimate Roblox/CoreGui elements
 local STEALTH_GUI_NAMES = {
-    -- Core Roblox GUI names
+    -- Core Roblox GUI names (high priority - these are actual Roblox GUIs)
     "RobloxGui", "CoreGui", "SystemGui", "PlayerListGui", "ChatWindow",
     "BackpackGui", "HealthGui", "TopBarApp", "SettingsHub", "InspectMenu",
-    -- Additional legitimate-looking names
+    -- Internal Roblox service names
     "RbxAnalyticsService", "RbxEventHandler", "RbxReplicatedFirst",
     "CoreScript_Internal", "PlayerDisplay_Handler", "SystemOverlay",
     "UIService_Manager", "CorePackages_Root", "VoiceChatShield",
@@ -97,7 +99,11 @@ local STEALTH_GUI_NAMES = {
     "NotificationFrame", "ControllerMenu", "TouchControlFrame",
     "VRService_Overlay", "StarterGui_Clone", "LoadingGui_Core",
     "AvatarContextMenu", "RobloxNetworkStats", "PerformanceStats",
-    "TenFootInterface", "VirtualCursor", "InGameMenuCore"
+    "TenFootInterface", "VirtualCursor", "InGameMenuCore",
+    -- Additional stealth names
+    "RbxLocalization", "RbxThumbnail", "RbxAssetService", "RbxTextFilter",
+    "PolicyService_Internal", "SocialService_Handler", "VoiceChat_Internal",
+    "ExperienceChat", "UnibarV2", "Chrome", "SelfView", "Unibar"
 }
 
 -- Stealth names for non-GUI instances (Parts, Highlights, BillboardGuis)
@@ -105,33 +111,204 @@ local STEALTH_INSTANCE_NAMES = {
     "RbxMeshPart", "CorePart_Internal", "SystemPart", "RbxBasePart",
     "PhysicsHandler", "CollisionPart", "RenderPart", "NetworkPart",
     "ReplicatorPart", "DataModelPart", "AnimationPart", "SoundPart",
-    "LightingPart", "EffectPart", "StreamingPart", "TerrainPart"
+    "LightingPart", "EffectPart", "StreamingPart", "TerrainPart",
+    "RbxCharacterPart", "RbxAccessory", "RbxJoint", "RbxMotor",
+    "CollisionGroup", "PhysicsGroup", "NetworkGroup", "ReplicaGroup"
 }
 
 -- Track all protected GUIs with weak references (auto-cleanup when destroyed)
 local ProtectedGUIs = setmetatable({}, { __mode = "v" })
 local ProtectedInstances = setmetatable({}, { __mode = "v" })
+local CloakedInstances = setmetatable({}, { __mode = "k" }) -- Instances hidden from GetChildren/GetDescendants
 
+-- PERFORMANCE: Track GUIs we've already protected to prevent double-protection
+local AlreadyProtectedGUIs = setmetatable({}, { __mode = "k" })
+-- PERFORMANCE: Track OUR script-created GUIs (only protect these, not game GUIs)
+local OurScriptGUIs = setmetatable({}, { __mode = "k" })
+
+-- Generate unique stealth name with timestamp and random components
 local function getRandomStealthName()
-    return STEALTH_GUI_NAMES[math.random(1, #STEALTH_GUI_NAMES)] .. "_" .. tostring(math.random(10000, 99999)) .. "_" .. tostring(tick()):sub(-4)
+    local base = STEALTH_GUI_NAMES[math.random(1, #STEALTH_GUI_NAMES)]
+    local rand1 = math.random(10000, 99999)
+    local rand2 = string.format("%x", math.random(0, 0xFFFF))
+    return base .. "_" .. rand1 .. "_" .. rand2
 end
 
 local function getRandomInstanceName()
-    return STEALTH_INSTANCE_NAMES[math.random(1, #STEALTH_INSTANCE_NAMES)] .. "_" .. tostring(math.random(10000, 99999))
+    local base = STEALTH_INSTANCE_NAMES[math.random(1, #STEALTH_INSTANCE_NAMES)]
+    local rand1 = math.random(10000, 99999)
+    return base .. "_" .. rand1
 end
 
--- Enhanced GUI protection with multiple fallback methods
+-- Generate random child element names (frames, labels, buttons)
+local function getRandomChildName(className)
+    local prefixes = {
+        Frame = {"Container", "Holder", "Panel", "Box", "Region", "Area"},
+        TextLabel = {"Label", "Text", "Display", "Info", "Title", "Desc"},
+        TextButton = {"Button", "Btn", "Action", "Control", "Trigger"},
+        ImageLabel = {"Icon", "Image", "Graphic", "Visual", "Sprite"},
+        ImageButton = {"IconBtn", "ImgButton", "Visual", "Sprite"},
+        ScrollingFrame = {"Scroll", "List", "Content", "Items"},
+        TextBox = {"Input", "Field", "Entry", "TextInput"},
+    }
+    local options = prefixes[className] or {"Element", "Child", "Item", "Node"}
+    return options[math.random(1, #options)] .. "_" .. math.random(1000, 9999)
+end
+
+-- ===== INSTANCE CLOAKING SYSTEM =====
+-- Hooks GetChildren, GetDescendants, FindFirstChild to hide protected instances
+
+local CloakingEnabled = false
+local oldGetChildren, oldGetDescendants, oldFindFirstChild, oldFindFirstChildOfClass, oldFindFirstChildWhichIsA
+
+local function setupInstanceCloaking()
+    if CloakingEnabled then return end
+    if not hookfunction or not newcclosure then return end
+    
+    pcall(function()
+        local folder = Instance.new("Folder")
+        
+        -- Hook GetChildren
+        oldGetChildren = hookfunction(folder.GetChildren, newcclosure(function(self)
+            local children = oldGetChildren(self)
+            local filtered = {}
+            for _, child in ipairs(children) do
+                if not CloakedInstances[child] then
+                    table.insert(filtered, child)
+                end
+            end
+            return filtered
+        end))
+        
+        -- Hook GetDescendants
+        oldGetDescendants = hookfunction(folder.GetDescendants, newcclosure(function(self)
+            local descendants = oldGetDescendants(self)
+            local filtered = {}
+            for _, desc in ipairs(descendants) do
+                if not CloakedInstances[desc] then
+                    table.insert(filtered, desc)
+                end
+            end
+            return filtered
+        end))
+        
+        -- Hook FindFirstChild
+        oldFindFirstChild = hookfunction(folder.FindFirstChild, newcclosure(function(self, name, recursive)
+            local result
+            if recursive then
+                result = oldFindFirstChild(self, name, true)
+            else
+                result = oldFindFirstChild(self, name)
+            end
+            if result and CloakedInstances[result] then
+                return nil
+            end
+            return result
+        end))
+        
+        -- Hook FindFirstChildOfClass
+        oldFindFirstChildOfClass = hookfunction(folder.FindFirstChildOfClass, newcclosure(function(self, className)
+            local result = oldFindFirstChildOfClass(self, className)
+            if result and CloakedInstances[result] then
+                return nil
+            end
+            return result
+        end))
+        
+        -- Hook FindFirstChildWhichIsA
+        oldFindFirstChildWhichIsA = hookfunction(folder.FindFirstChildWhichIsA, newcclosure(function(self, className)
+            local result = oldFindFirstChildWhichIsA(self, className)
+            if result and CloakedInstances[result] then
+                return nil
+            end
+            return result
+        end))
+        
+        folder:Destroy()
+        CloakingEnabled = true
+        
+        if ANTIBAN_DEBUG then
+            warn("[ANTI-BAN] Instance cloaking system active")
+        end
+    end)
+end
+
+-- Cloak an instance (hide from GetChildren/GetDescendants/FindFirstChild)
+local function cloakInstance(instance)
+    if not instance then return end
+    CloakedInstances[instance] = true
+    -- Also cloak all descendants
+    pcall(function()
+        for _, desc in ipairs(instance:GetDescendants()) do
+            CloakedInstances[desc] = true
+        end
+    end)
+end
+
+-- Uncloak an instance
+local function uncloakInstance(instance)
+    if not instance then return end
+    CloakedInstances[instance] = nil
+    pcall(function()
+        for _, desc in ipairs(instance:GetDescendants()) do
+            CloakedInstances[desc] = nil
+        end
+    end)
+end
+
+-- ===== DEEP PROTECTION SYSTEM =====
+-- Protects all child elements with stealth names
+
+local function protectAllChildren(parent)
+    if not parent then return end
+    pcall(function()
+        for _, child in ipairs(parent:GetDescendants()) do
+            if child:IsA("GuiObject") or child:IsA("GuiBase") then
+                child.Name = getRandomChildName(child.ClassName)
+                ProtectedInstances[child] = true
+            end
+        end
+    end)
+end
+
+-- Watch for new children and protect them
+local function watchAndProtectChildren(parent)
+    if not parent then return end
+    pcall(function()
+        parent.DescendantAdded:Connect(function(desc)
+            if desc:IsA("GuiObject") or desc:IsA("GuiBase") then
+                task.defer(function()
+                    desc.Name = getRandomChildName(desc.ClassName)
+                    ProtectedInstances[desc] = true
+                    CloakedInstances[desc] = true
+                end)
+            end
+        end)
+    end)
+end
+
+-- ===== MAIN GUI PROTECTION FUNCTION =====
+-- Enhanced GUI protection with multiple fallback methods and deep protection
+-- PERFORMANCE: Only protects OUR script-created GUIs, not game GUIs
+
 local function protectGUI(gui)
     if not gui then return end
     
+    -- PERFORMANCE: Skip if already protected (prevents memory leak from repeated protection)
+    if AlreadyProtectedGUIs[gui] then return end
+    AlreadyProtectedGUIs[gui] = true
+    
+    -- PERFORMANCE: Mark as our GUI so we only rotate/protect our own GUIs
+    OurScriptGUIs[gui] = true
+    
     pcall(function()
-        -- Assign random stealth name before parenting
+        -- Step 1: Assign random stealth name
         gui.Name = getRandomStealthName()
         
-        -- Try multiple protection methods in order of preference
+        -- Step 2: Try multiple protection methods in order of preference
         local parented = false
         
-        -- Method 1: gethui (most hidden - goes to hidden UI container)
+        -- Method 1: gethui (most hidden - executor's hidden UI container)
         if not parented and gethui then
             pcall(function()
                 gui.Parent = gethui()
@@ -165,12 +342,21 @@ local function protectGUI(gui)
             end)
         end
         
-        -- Set stealth properties
+        -- Step 3: Set stealth properties
         pcall(function() gui.ResetOnSpawn = false end)
         pcall(function() gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling end)
         
-        -- Track for FindFirstChild protection
+        -- Step 4: Track for protection
         ProtectedGUIs[gui] = true
+        
+        -- Step 5: Cloak the GUI from GetChildren/FindFirstChild
+        cloakInstance(gui)
+        
+        -- PERFORMANCE: Skip deep child protection (causes overhead)
+        -- protectAllChildren(gui) -- DISABLED for performance
+        
+        -- PERFORMANCE: Skip child watching (causes memory leak from connections)
+        -- watchAndProtectChildren(gui) -- DISABLED for performance
     end)
 end
 
@@ -180,13 +366,14 @@ local function protectInstance(instance)
     pcall(function()
         instance.Name = getRandomInstanceName()
         ProtectedInstances[instance] = true
+        CloakedInstances[instance] = true
     end)
 end
 
 -- Create protected ScreenGui with automatic stealth
 local function createProtectedScreenGui(name)
     local gui = Instance.new("ScreenGui")
-    gui.Name = getRandomStealthName() -- Override any name with stealth name
+    gui.Name = getRandomStealthName()
     gui.ResetOnSpawn = false
     protectGUI(gui)
     return gui
@@ -204,15 +391,55 @@ local function isStealthName(name)
     return false
 end
 
+-- ===== PERIODIC NAME ROTATION =====
+-- Rotates GUI names periodically to prevent pattern detection
+-- PERFORMANCE: Reduced frequency and only rotates OUR GUIs
+
+local function startNameRotation()
+    task.defer(function()
+        while true do
+            task.wait(180) -- PERFORMANCE: Rotate every 3 minutes instead of 1 minute
+            local count = 0
+            local maxPerCycle = 10 -- PERFORMANCE: Limit processing per cycle
+            for gui, _ in pairs(OurScriptGUIs) do
+                if count >= maxPerCycle then break end
+                pcall(function()
+                    if gui and gui.Parent then
+                        gui.Name = getRandomStealthName()
+                        count = count + 1
+                    else
+                        -- PERFORMANCE: Clean up dead references
+                        OurScriptGUIs[gui] = nil
+                        ProtectedGUIs[gui] = nil
+                        AlreadyProtectedGUIs[gui] = nil
+                    end
+                end)
+            end
+            -- PERFORMANCE: Force garbage collection occasionally
+            if count > 0 then
+                pcall(function() collectgarbage("step", 100) end)
+            end
+        end
+    end)
+end
+
+-- Initialize cloaking system
+setupInstanceCloaking()
+startNameRotation()
+
 -- Expose for use throughout script
 _G.protectGUI = protectGUI
 _G.protectInstance = protectInstance
 _G.createProtectedScreenGui = createProtectedScreenGui
 _G.getRandomStealthName = getRandomStealthName
 _G.getRandomInstanceName = getRandomInstanceName
+_G.getRandomChildName = getRandomChildName
 _G.isStealthName = isStealthName
+_G.cloakInstance = cloakInstance
+_G.uncloakInstance = uncloakInstance
 _G.ProtectedGUIs = ProtectedGUIs
 _G.ProtectedInstances = ProtectedInstances
+_G.CloakedInstances = CloakedInstances
 
 -- ===== 2. KICK/BAN PREVENTION SYSTEM =====
 -- Blocks attempts to kick or ban the player
@@ -624,10 +851,15 @@ local function cleanAntiCheatConnections()
 end
 
 -- Run connection cleaner periodically
+-- PERFORMANCE: Reduced frequency to minimize overhead
 task.defer(function()
+    task.wait(10) -- Initial delay to let game load
+    cleanAntiCheatConnections() -- Run once at start
     while true do
+        task.wait(120) -- PERFORMANCE: Check every 2 minutes instead of 30 seconds
         cleanAntiCheatConnections()
-        task.wait(30) -- Check every 30 seconds
+        -- PERFORMANCE: Trigger garbage collection after cleanup
+        pcall(function() collectgarbage("step", 200) end)
     end
 end)
 
@@ -661,58 +893,31 @@ end)
 
 do
     local protectedRemotes = setmetatable({}, { __mode = "k" })
-    local remoteCallHistory = {} -- Track call frequency
-    local CALL_RATE_LIMIT = 0.05 -- Minimum seconds between identical calls
-    local CALL_RANDOMIZE = true -- Add random delays to look human
+    local CALL_RANDOMIZE = true -- Add micro-random delays to avoid pattern detection
+    local CALL_MIN_DELAY = 0.005 -- 5ms minimum (very fast)
+    local CALL_MAX_DELAY = 0.015 -- 15ms maximum (still fast)
     
-    -- Admin log bypass: Spoof the remote call to look like legitimate game traffic
-    local function getRandomDelay()
-        if not CALL_RANDOMIZE then return 0 end
-        return math.random() * 0.02 -- 0-20ms random delay
-    end
-    
-    -- Check if we should throttle this call (prevent spam detection)
-    local function shouldThrottleCall(remote, action)
-        local key = tostring(remote) .. "_" .. tostring(action or "")
-        local now = tick()
-        local lastCall = remoteCallHistory[key]
-        
-        if lastCall and (now - lastCall) < CALL_RATE_LIMIT then
-            return true -- Too fast, throttle
-        end
-        
-        remoteCallHistory[key] = now
-        return false
-    end
-    
-    -- Clean old entries periodically (memory management)
-    task.spawn(function()
-        while true do
-            task.wait(30)
-            local now = tick()
-            for k, v in pairs(remoteCallHistory) do
-                if now - v > 5 then
-                    remoteCallHistory[k] = nil
-                end
-            end
-        end
-    end)
-    
+    -- Completely hidden remote call - uses hooked path if available
     local function safeFireServer(remote, ...)
         if not remote then return end
         local args = {...}
-        local action = args[1]
         
-        -- Add tiny random delay to avoid pattern detection
-        local delay = getRandomDelay()
-        if delay > 0 then
-            task.wait(delay)
+        -- Micro-random delay (5-15ms) - fast but breaks pattern detection
+        if CALL_RANDOMIZE then
+            local delay = CALL_MIN_DELAY + (math.random() * (CALL_MAX_DELAY - CALL_MIN_DELAY))
+            if delay > 0 then
+                task.wait(delay)
+            end
         end
         
+        -- Use hooked FireServer (goes through our namecall hook, appears as normal game traffic)
+        -- If originalFireServer exists, use it directly for maximum stealth
         local success, result = pcall(function()
             if originalFireServer then
+                -- Direct path through hooked metatable - completely hidden from remote spy
                 return originalFireServer(remote, unpack(args))
             else
+                -- Fallback to normal FireServer (still goes through our namecall hook)
                 return remote:FireServer(unpack(args))
             end
         end)
@@ -827,13 +1032,178 @@ end
 
 -- ===== 11. ANTI-DETECTION STATUS =====
 _G.AntiBan = true
-_G.AntiBanVersion = "2.1"
+_G.AntiBanVersion = "2.2"
 _G.ExecutorCapabilities = ExecutorCapabilities
 _G.AntiBanStats = {
     getKickBlocked = function() return kickBlocked end,
     getBanBlocked = function() return banBlocked end,
     getAdminLogBlocked = function() return adminLogBlockCount end,
 }
+
+-- ===== 12. ENHANCED BYPASS SYSTEM (Integrated from bypass clean.lua) =====
+-- Advanced property spoofing and connection disabling
+
+pcall(function()
+    local Character = LocalPlayer.Character
+    if not Character then return end
+    local Humanoid = Character:FindFirstChildOfClass("Humanoid")
+    if not Humanoid then return end
+    local HumanoidRootPart = Character:FindFirstChild("HumanoidRootPart")
+    
+    -- Store original values for spoofing
+    local OriginalWalkSpeed = Humanoid.WalkSpeed
+    local OriginalJumpPower = Humanoid.JumpPower
+    local OriginalHealth = Humanoid.Health
+    local OriginalMaxHealth = Humanoid.MaxHealth
+    local OriginalHipHeight = Humanoid.HipHeight
+    local OriginalGravity = workspace.Gravity
+    local OriginalVelocity = HumanoidRootPart and HumanoidRootPart.Velocity or Vector3.new(0,0,0)
+    local OriginalSize = HumanoidRootPart and HumanoidRootPart.Size or Vector3.new(2,2,1)
+    
+    -- Advanced hooks using AddSetHook/AddPropertyEmulator if available
+    if ExecutorCapabilities.hasAddSetHook then
+        pcall(function() Humanoid:AddSetHook("WalkSpeed") end)
+        pcall(function() Humanoid:AddSetHook("JumpPower") end)
+        pcall(function() Humanoid:AddSetHook("JumpHeight") end)
+        pcall(function() Humanoid:AddSetHook("HipHeight") end)
+        pcall(function() Humanoid:AddSetHook("MaxSlopeAngle") end)
+        pcall(function() workspace:AddSetHook("Gravity") end)
+        if HumanoidRootPart then
+            pcall(function() HumanoidRootPart:AddSetHook("CFrame") end)
+            pcall(function() HumanoidRootPart:AddSetHook("Velocity") end)
+            pcall(function() HumanoidRootPart:AddSetHook("AssemblyLinearVelocity") end)
+        end
+    end
+    
+    if ExecutorCapabilities.hasAddPropertyEmulator then
+        pcall(function() Humanoid:AddPropertyEmulator("WalkSpeed") end)
+        pcall(function() Humanoid:AddPropertyEmulator("JumpPower") end)
+        pcall(function() Humanoid:AddPropertyEmulator("Health") end)
+        pcall(function() Humanoid:AddPropertyEmulator("MaxHealth") end)
+        pcall(function() Humanoid:AddPropertyEmulator("HipHeight") end)
+        pcall(function() workspace:AddPropertyEmulator("Gravity") end)
+        if HumanoidRootPart then
+            pcall(function() HumanoidRootPart:AddPropertyEmulator("Velocity") end)
+            pcall(function() HumanoidRootPart:AddPropertyEmulator("Size") end)
+        end
+    end
+    
+    -- Global Get Hooks (spoof property reads)
+    if ExecutorCapabilities.hasAddGetHook then
+        pcall(function() game:AddGlobalGetHook("WalkSpeed", OriginalWalkSpeed) end)
+        pcall(function() game:AddGlobalGetHook("JumpPower", OriginalJumpPower) end)
+        pcall(function() game:AddGlobalGetHook("Health", OriginalHealth) end)
+        pcall(function() game:AddGlobalGetHook("MaxHealth", OriginalMaxHealth) end)
+        pcall(function() game:AddGlobalGetHook("HipHeight", OriginalHipHeight) end)
+        pcall(function() game:AddGlobalGetHook("Humanoid.Died", false) end)
+        pcall(function() game:AddGlobalGetHook("Gravity", OriginalGravity) end)
+        pcall(function() game:AddGlobalGetHook("Velocity", OriginalVelocity) end)
+    end
+    
+    -- Global Set Hooks (block property writes from anti-cheat)
+    pcall(function()
+        if game.AddGlobalSetHook then
+            game:AddGlobalSetHook("WalkSpeed")
+            game:AddGlobalSetHook("JumpPower")
+            game:AddGlobalSetHook("JumpHeight")
+            game:AddGlobalSetHook("Health")
+            game:AddGlobalSetHook("MaxHealth")
+            game:AddGlobalSetHook("HipHeight")
+            game:AddGlobalSetHook("MaxSlopeAngle")
+            game:AddGlobalSetHook("Gravity")
+            game:AddGlobalSetHook("Velocity")
+            game:AddGlobalSetHook("AssemblyLinearVelocity")
+        end
+    end)
+    
+    -- Block Kick calls
+    pcall(function()
+        if game.AddGlobalCallHook then
+            game:AddGlobalCallHook("Kick", function() end)
+        end
+        if Character and Character.AddCallHook then
+            Character:AddCallHook("BreakJoints", function() return end)
+        end
+        if LocalPlayer.AddCallHook then
+            LocalPlayer:AddCallHook("Kick", function() return task.wait(9e9) end)
+        end
+    end)
+    
+    -- Disable anti-cheat event connections
+    pcall(function()
+        if getconnections then
+            -- Disable ItemChanged connections
+            for _, conn in next, getconnections(game.ItemChanged) do
+                pcall(function() conn:Disable() end)
+            end
+            -- Disable Humanoid.Changed connections
+            if Humanoid then
+                for _, conn in next, getconnections(Humanoid.Changed) do
+                    pcall(function() conn:Disable() end)
+                end
+            end
+            -- Disable LogService.MessageOut connections
+            pcall(function()
+                for _, conn in next, getconnections(game:GetService("LogService").MessageOut) do
+                    conn:Disable()
+                end
+            end)
+            -- Disable ScriptContext.Error connections
+            pcall(function()
+                for _, conn in next, getconnections(game:GetService("ScriptContext").Error) do
+                    conn:Disable()
+                end
+            end)
+        end
+    end)
+    
+    -- Set HttpService timeout (helps with anti-cheat that uses HTTP)
+    pcall(function()
+        game:GetService("HttpService"):SetTimeout(0.05)
+    end)
+    
+    if ANTIBAN_DEBUG then
+        warn("[ANTI-BAN] Enhanced bypass system initialized")
+    end
+end)
+
+-- Re-apply on respawn
+LocalPlayer.CharacterAdded:Connect(function(newChar)
+    task.wait(0.5)
+    pcall(function()
+        local Humanoid = newChar:WaitForChild("Humanoid", 5)
+        local HumanoidRootPart = newChar:WaitForChild("HumanoidRootPart", 5)
+        if not Humanoid or not HumanoidRootPart then return end
+        
+        local OriginalWalkSpeed = Humanoid.WalkSpeed
+        local OriginalJumpPower = Humanoid.JumpPower
+        
+        if ExecutorCapabilities.hasAddSetHook then
+            pcall(function() Humanoid:AddSetHook("WalkSpeed") end)
+            pcall(function() Humanoid:AddSetHook("JumpPower") end)
+            pcall(function() HumanoidRootPart:AddSetHook("CFrame") end)
+            pcall(function() HumanoidRootPart:AddSetHook("Velocity") end)
+        end
+        
+        if ExecutorCapabilities.hasAddPropertyEmulator then
+            pcall(function() Humanoid:AddPropertyEmulator("WalkSpeed") end)
+            pcall(function() Humanoid:AddPropertyEmulator("JumpPower") end)
+            pcall(function() HumanoidRootPart:AddPropertyEmulator("Velocity") end)
+        end
+        
+        -- Disable Humanoid.Changed for new character
+        if getconnections then
+            for _, conn in next, getconnections(Humanoid.Changed) do
+                pcall(function() conn:Disable() end)
+            end
+        end
+        
+        -- Block BreakJoints
+        if newChar.AddCallHook then
+            pcall(function() newChar:AddCallHook("BreakJoints", function() return end) end)
+        end
+    end)
+end)
 
 end
 -- ===== END ADVANCED BYPASS ANTI-CHEAT =====
@@ -941,6 +1311,19 @@ do
         DRACULA = "Dracula",
         BOMBER_VIS = "BomberVis",
     }
+    
+    -- ===== PERIODIC GARBAGE COLLECTION =====
+    -- PERFORMANCE: Run garbage collection periodically to prevent memory buildup
+    task.defer(function()
+        task.wait(30) -- Initial delay
+        while true do
+            -- Run incremental garbage collection
+            pcall(function()
+                collectgarbage("step", 200)
+            end)
+            task.wait(60) -- Run every 60 seconds
+        end
+    end)
     
 end
 -- ===== END PERFORMANCE OPTIMIZATION SYSTEM =====
@@ -1298,7 +1681,7 @@ local Window = WindUI:CreateWindow({
 
     Window:SetIconSize(48)
     Window:Tag({
-        Title = "v4",
+        Title = "v4.1",
         Color = Color3.fromHex("#d9ff00") -- deep crimson
     })
     Window:Tag({
@@ -1330,13 +1713,13 @@ local Window = WindUI:CreateWindow({
     })
 
     InfoSection:Paragraph({
-        Title = "Katchi Hub v4",
+        Title = "Katchi Hub v4.1",
         Desc = "Professional Guts & BlackPowder Script Hub\nMade by Yuki\nExecutor: "..(identifyexecutor and identifyexecutor() or "Unknown"),
     })
 
     InfoSection:Paragraph({
         Title = "Changelogs",
-        Desc = "Features\n- Added Copy Animation ID\n- Added Animation Details (Can Copy Animation ID)\n- Added Custom Animation (Paste Animations and play them)\n\nFixes\n- Fixed Minor Bypass Bugs",
+        Desc = "Fixes\n- Fixed Minor Bypass Bugs\n- Improved Kill Aura\n- Improved Animation Scanner (can Scan more animations now.)\n- Fixed Config Bug\n- Fixed Minor Bugs",
     })
 
 -- Make sure this exists somewhere near the top of your script
@@ -1345,7 +1728,7 @@ local HttpService = game:GetService("HttpService")
 -- Discord constants
 local discordInvite = "https://discord.gg/vBYZCGGyK6"
 local widgetUrl = "https://discord.com/api/guilds/1433658537027833969/widget.json"
-local TOTAL_MEMBERS = 474 -- manually keep this roughly updated
+local TOTAL_MEMBERS = 652 -- manually keep this roughly updated
 
 -- Main Discord card
 local DiscordCard = DiscordSection:Paragraph({
@@ -2491,7 +2874,7 @@ for _, t in ipairs(SilentAimZombieTypes) do SilentAimEnabledTypes[t] = false end
 -- Silent Aim FOV settings (must be declared here so loop can access it)
 local SILENT_AIM_USE_FOV = false
 local SILENT_AIM_SHOW_FOV = false
-local SILENT_AIM_MOBILE_FOV = false
+SILENT_AIM_MOBILE_FOV = false
 local SILENT_AIM_FOV_SIZE = 50
 
 -- Forward declaration for Silent Aim FOV check function (defined later in UI section)
@@ -2518,13 +2901,13 @@ local autoShootActive = false -- Whether auto shoot is currently firing
 -- VirtualInputManager for simulating mouse clicks
 local VirtualInputManager = game:GetService("VirtualInputManager")
 
--- Bomber Safety settings
-local BOMBER_SAFE_TEAMMATES = false -- Don't shoot bombers near teammates
-local BOMBER_SAFE_SELF = false -- Don't shoot bombers near self
-local BOMBER_SAFE_RADIUS = 10 -- Radius to check for teammates/self
-local BOMBER_VISUALIZE_RADIUS = false -- Show explosion radius visualization
+-- Bomber Safety settings (global for config)
+BOMBER_SAFE_TEAMMATES = false -- Don't shoot bombers near teammates
+BOMBER_SAFE_SELF = false -- Don't shoot bombers near self
+BOMBER_SAFE_RADIUS = 10 -- Radius to check for teammates/self
+BOMBER_VISUALIZE_RADIUS = false -- Show explosion radius visualization (global for UI access)
 -- Use weak keys so entries for destroyed bombers are garbage collected
-local BomberRadiusVisuals = setmetatable({}, { __mode = "k" }) -- Store visual parts for bomber radius
+BomberRadiusVisuals = setmetatable({}, { __mode = "k" }) -- Store visual parts for bomber radius (global for UI access)
 local SHOOT_BOMBER_NEAR_TEAMMATES = false -- ONLY shoot bombers when near teammates (opposite behavior)
 local BomberSafetyWhitelist = {} -- array of player names to protect from bomber shots (Don't Shoot Near)
 local ShootBomberNearWhitelist = {} -- array of player names to trigger bomber shots (Shoot Bomber Near)
@@ -2535,7 +2918,7 @@ local MAX_SAVE_PLAYERS_RANGE = MAX_TARGET_RANGE
 local INSTANT_SAVE_PLAYERS_ENABLED = false
 -- Save player delay slider
 local SAVE_PLAYER_DELAY = 0.5
-local PREDICTION_DISTANCE = 0 -- seconds to lead target positions (set via UI)
+PREDICTION_DISTANCE = 0 -- seconds to lead target positions (global for config)
 local PREDICTION_MIN_SPEED = 2 -- studs/sec; below this we treat targets as stationary
 local PREDICTION_STILLNESS_WINDOW = 0.4 -- seconds of low movement before treating as stationary
 -- Wall check thresholds
@@ -2619,9 +3002,9 @@ end
 -- ===== FOV SETTINGS ===== (Global for keybind access)
 USE_FOV = false      -- "Use Fov" toggle
 SHOW_FOV = false     -- "Show Fov" toggle
-local MOBILE_FOV = false   -- "Mobile Fov" toggle (centered) / off = follow cursor
+MOBILE_FOV = false   -- "Mobile Fov" toggle (centered) / off = follow cursor
 
-local FOV_SIZE_DEG = 50 -- default FOV angle in degrees
+FOV_SIZE_DEG = 50 -- default FOV angle in degrees (global for config)
 local FOV_MIN_DEG, FOV_MAX_DEG = 10, 120
 
 local fovGui = nil
@@ -2765,12 +3148,13 @@ local function isWorldPosInFov(worldPos)
     return dist <= radius
 end
 -- ===== TARGET VISUALS (TARGET ESP) =====
-local TARGET_ESP_ENABLED = false
-local AIM_DOT_ENABLED = false -- Show dot at aim position
+TARGET_ESP_ENABLED = false -- global for config
+AIM_DOT_ENABLED = false -- Show dot at aim position (global for config)
 
-local activeAimModel = nil
-local activeAimPart = nil
-local activeHighlight = nil -- Highlight instance for target esp
+-- Make these global so they can be accessed from multiple places
+activeAimModel = nil
+activeAimPart = nil
+activeHighlight = nil -- Highlight instance for target esp
 local activeAimDot = nil -- BillboardGui for aim position dot
 local activeAimDotPart = nil -- Invisible part to attach billboard to
 local activeAimDotCurrentPos = nil -- Current interpolated position
@@ -4955,7 +5339,9 @@ local function monitorCharacterTools(char)
     if not char then return end
     -- Clean up existing connections for this character
     cleanupConnections()
-    -- Watch existing tools and also attach hand mortar watchers
+    -- Attach hand mortar watcher once per character (not per tool)
+    pcall(function() attachHandMortarWatcher() end)
+    -- Watch existing tools
     for _, c in ipairs(char:GetChildren()) do
         if c:IsA("Tool") then
             -- Watch guns
@@ -4970,8 +5356,6 @@ local function monitorCharacterTools(char)
                 end)
                 if ok and eqConn then table.insert(activeConnections, eqConn) end
             end
-            -- Attach hand mortar watcher (best-effort)
-            pcall(function() attachHandMortarWatcher(c) end)
         end
     end
     -- Set up new connections for tools added later
@@ -4988,8 +5372,6 @@ local function monitorCharacterTools(char)
                 end)
                 if ok and eqConn then table.insert(activeConnections, eqConn) end
             end
-            -- Hand mortar watcher for future tools
-            pcall(function() attachHandMortarWatcher(child) end)
         end
     end)
     table.insert(activeConnections, childAddedConn)
@@ -5281,7 +5663,7 @@ local SilentAimBomberNearWhitelist = {} -- empty = all
 -- Auto Save Players FOV settings
 local AUTO_SAVE_USE_FOV = false
 local AUTO_SAVE_SHOW_FOV = false
-local AUTO_SAVE_MOBILE_FOV = false
+AUTO_SAVE_MOBILE_FOV = false
 local AUTO_SAVE_FOV_SIZE = 50
 local autoSaveFovGui = nil
 local autoSaveFovCircle = nil
@@ -6715,7 +7097,7 @@ do -- // ESP Tab
     local CameraFolder = workspace:FindFirstChild("Camera")
     -- Use weak table so dead zombie references are auto-collected by GC
     local IdentifiedIgniters = setmetatable({}, { __mode = "k" })
-    local ESPConfigs = {
+    ESPConfigs = ESPConfigs or {
         Bomber = {
             color = Color3.fromRGB(255, 180, 60),
             label = "Barrel",
@@ -6832,24 +7214,43 @@ do -- // ESP Tab
     local ChamsTransparency = 0.6
     local PerformanceMode = false
     local ChamsMaxDistance = 2000
+    
+    -- PERFORMANCE: Distance culling - don't create ESP for zombies too far away
+    local ESP_CREATION_MAX_DISTANCE = 500 -- Only create ESP for zombies within this distance
+    local ESP_VISIBLE_MAX_DISTANCE = 300 -- Distance at which ESP becomes visible
+    local ESP_SCAN_BATCH_SIZE = 20 -- Max zombies to process per scan cycle
 
     local activeCount = 0
     local scanLoop
     local renderConn
+    
+    -- PERFORMANCE: Cache camera position
+    local cachedCameraPos = Vector3.new(0, 0, 0)
+    local lastCameraCacheTime = 0
 
     local function GetAdorneePart(model)
         if not model or not model:IsA("Model") then return nil end
-        local head = model:FindFirstChild("Head", true)
+        -- PERFORMANCE: Check common parts first without using FindFirstChild with recursive=true
+        local head = model:FindFirstChild("Head")
         if head and head:IsA("BasePart") then return head end
-        local hrp = model:FindFirstChild("HumanoidRootPart", true)
+        local hrp = model:FindFirstChild("HumanoidRootPart")
         if hrp and hrp:IsA("BasePart") then return hrp end
         if model.PrimaryPart and model.PrimaryPart:IsA("BasePart") then return model.PrimaryPart end
+        -- PERFORMANCE: Use GetChildren instead of GetDescendants (much faster)
         local children = model:GetChildren()
-        local possible = children[12]
-        if possible and possible:IsA("BasePart") then return possible end
-        for _, p in ipairs(model:GetDescendants()) do
+        for _, p in ipairs(children) do
             if p:IsA("BasePart") and p.Name ~= "Whale Oil Lantern" then
                 return p
+            end
+        end
+        -- Fallback: check first-level folders only
+        for _, child in ipairs(children) do
+            if child:IsA("Folder") or child:IsA("Model") then
+                for _, p in ipairs(child:GetChildren()) do
+                    if p:IsA("BasePart") and p.Name ~= "Whale Oil Lantern" then
+                        return p
+                    end
+                end
             end
         end
         return nil
@@ -7040,6 +7441,10 @@ end
             zombieSet[z] = true
         end
         
+        -- PERFORMANCE: Get camera position for distance culling
+        local cam = workspace.CurrentCamera
+        local camPos = cam and cam.CFrame.Position or Vector3.new(0, 0, 0)
+        
         for espType, enabled in pairs(EnabledESPs) do
             if enabled then
                 -- Remove visuals for zombies that no longer exist
@@ -7049,9 +7454,21 @@ end
                     end
                 end
                 
+                -- PERFORMANCE: Limit how many new visuals we create per scan cycle
+                local created = 0
+                
                 -- Add visuals for new zombies that match this type
                 for _, z in ipairs(zombies) do
+                    if created >= ESP_SCAN_BATCH_SIZE then break end -- PERFORMANCE: Batch limit
+                    
                     if z:IsA("Model") and not ESPData[espType][z] then
+                        -- PERFORMANCE: Distance culling - skip zombies too far away
+                        local zombiePart = z.PrimaryPart or z:FindFirstChild("HumanoidRootPart") or z:FindFirstChild("Head")
+                        if zombiePart then
+                            local dist = (camPos - zombiePart.Position).Magnitude
+                            if dist > ESP_CREATION_MAX_DISTANCE then continue end -- Skip distant zombies
+                        end
+                        
                         -- Check if zombie already has ESP from another type
                         local hasOtherESP = false
                         for otherType, otherData in pairs(ESPData) do
@@ -7063,6 +7480,7 @@ end
                         
                         if not hasOtherESP and ESPConfigs[espType].match(z) then
                             CreateVisual(espType, z)
+                            created = created + 1
                         end
                     end
                 end
@@ -7185,10 +7603,11 @@ end
             ScanAll()
             scanLoop = task.spawn(function()
                 local cleanupCounter = 0
+                local gcCounter = 0
                 while activeCount > 0 do
                     ScanAll()
                     
-                    -- Periodic cleanup every 10 scan cycles (5 seconds)
+                    -- Periodic cleanup every 10 scan cycles (~10 seconds)
                     cleanupCounter = cleanupCounter + 1
                     if cleanupCounter >= 10 then
                         cleanupCounter = 0
@@ -7212,12 +7631,19 @@ end
                         end
                     end
                     
-                    task.wait(0.75) -- Reduced scan frequency for better performance
+                    -- PERFORMANCE: Trigger garbage collection every 60 scan cycles (~60 seconds)
+                    gcCounter = gcCounter + 1
+                    if gcCounter >= 60 then
+                        gcCounter = 0
+                        pcall(function() collectgarbage("step", 100) end)
+                    end
+                    
+                    task.wait(1.0) -- PERFORMANCE: Increased scan interval to 1 second
                 end
             end)
             -- PERFORMANCE: Use Heartbeat with increased throttle interval
             local lastUpdate = 0
-            local UPDATE_INTERVAL = 0.15 -- Only update every 0.15 seconds
+            local UPDATE_INTERVAL = 0.2 -- PERFORMANCE: Update every 0.2 seconds (5 FPS for ESP)
             renderConn = RunService.Heartbeat:Connect(function()
                 -- PERFORMANCE: Mark ESP as active
                 if _G.KatchiPerf then _G.KatchiPerf.markActive("ESP") end
@@ -7225,6 +7651,14 @@ end
                 local now = tick()
                 if now - lastUpdate < UPDATE_INTERVAL then return end
                 lastUpdate = now
+                
+                -- PERFORMANCE: Update cached camera position
+                local cam = workspace.CurrentCamera
+                if cam then
+                    cachedCameraPos = cam.CFrame.Position
+                    lastCameraCacheTime = now
+                end
+                
                 UpdateAllBillboards()
             end)
         end
@@ -7344,8 +7778,8 @@ end
 
 -- ===== Improved multi-select ESP dropdown + enable toggle =====
 local EspList = { "Bomber", "Cuirassier", "Runner", "Zapper", "Igniter", "Shambler" }
-local SelectedESPs = {} -- list/table of selected types (default: empty)
-local previousSelectedESPs = {}
+SelectedESPs = SelectedESPs or {} -- list/table of selected types (global for config)
+previousSelectedESPs = previousSelectedESPs or {} -- global for config
 local espToggle -- forward ref
 ESPData = ESPData or {}       -- make sure table exists
 EnabledESPs = EnabledESPs or {} -- ensure exists
@@ -7572,15 +8006,16 @@ local LocalPlayer = Players.LocalPlayer
 -- Config
 local DEBUG = false
 
--- Anti-Detection Settings
+-- Anti-Detection Settings (Balanced: fast but safe)
 local KILLAURA_ANTICHEAT_BYPASS = true -- Enable anti-detection measures
-local KILLAURA_MIN_DELAY = 0.05 -- Minimum delay between attacks (reduced for better performance)
+local KILLAURA_MIN_DELAY = 0.03 -- Minimum delay between attacks (30ms - fast but safe)
 local KILLAURA_RANDOMIZE_DELAY = true -- Add random variation to timing
-local KILLAURA_MAX_ATTACKS_PER_SECOND = 20 -- Maximum attacks per second (increased)
+local KILLAURA_MAX_ATTACKS_PER_SECOND = 30 -- Maximum attacks per second (faster than do.lua)
 local KILLAURA_ATTACK_COUNTER = 0 -- Track attacks this second
 local KILLAURA_LAST_SECOND = 0 -- Track which second we're in
 local KILLAURA_VALIDATE_DISTANCE = false -- Disabled for better range
 local KILLAURA_MAX_REALISTIC_RANGE = 30 -- Maximum melee range (studs)
+local KILLAURA_SWING_TO_HIT_DELAY = 0.02 -- Delay between Swing and HitZombie (20ms - minimal but present)
 
 -- State variables (Global for keybind access)
 KillAuraEnabled = false
@@ -7595,9 +8030,9 @@ KillAura_AutoEquipMelee = false
 IgnoreSpawningZombies = true
 KillAura_HitboxExpanderEnabled = false
 
--- Zombie type targeting (which types to kill)
+-- Zombie type targeting (which types to kill) - global for config
 -- Types: Shambler (Normal), Bomber (Barrel), Runner (Fast), Zapper (Sapper), Igniter, Cuirassier (Slim)
-local KillAura_SelectedZombieTypes = {
+KillAura_SelectedZombieTypes = {
     ["Shambler"] = true,
     ["Bomber"] = false,
     ["Runner"] = true,
@@ -7606,8 +8041,8 @@ local KillAura_SelectedZombieTypes = {
     ["Cuirassier"] = true
 }
 
--- NEW: bayonet setting
-local KillAura_EnableBayonet = false
+-- NEW: bayonet setting (global for config)
+KillAura_EnableBayonet = false
 
 -- ADDED: Store reference to Hitbox Expander toggle for programmatic control
 local HitboxExpanderToggleElement = nil
@@ -7761,14 +8196,25 @@ local function KillAura_ScanRemotesNow()
     KillAura_lastRemoteScan = tick()
 end
 
+-- Debounce remote scanning to prevent lag when spamming equip/unequip
+local KillAura_scanDebounce = false
+local function KillAura_DebouncedScan()
+    if KillAura_scanDebounce then return end
+    KillAura_scanDebounce = true
+    task.delay(0.15, function()
+        KillAura_scanDebounce = false
+        KillAura_ScanRemotesNow()
+    end)
+end
+
 LocalPlayer.CharacterAdded:Connect(function(char)
     task.wait(0.6)
     KillAura_ScanRemotesNow()
     char.ChildAdded:Connect(function(child)
-        if child:IsA("Tool") then task.delay(0.05, KillAura_ScanRemotesNow) end
+        if child:IsA("Tool") then KillAura_DebouncedScan() end
     end)
     char.ChildRemoved:Connect(function(child)
-        if child:IsA("Tool") then task.delay(0.05, KillAura_ScanRemotesNow) end
+        if child:IsA("Tool") then KillAura_DebouncedScan() end
     end)
 end)
 if LocalPlayer.Character then KillAura_ScanRemotesNow() end
@@ -8053,16 +8499,19 @@ local function KillAura_performLegitAttack(hrp, meleeTool, primaryRemote, entry,
     end)
 end
 
--- Fast mode helper: fires remotes directly without animations
+-- Fast mode helper: fires remotes with SafeFireServer for anti-detection
 local function KillAura_performFastAttack(meleeTool, primaryRemote, entry, isBayonet, hrpPos)
     -- Anti-detection: Rate limit check
     if not KillAura_canAttack() then return end
     
-    -- Anti-detection: Distance validation
-    local attackPos = KillAura_getAttackPosition(entry.model, entry.head)
-    if hrpPos and not KillAura_isValidAttackDistance(hrpPos, attackPos) then
-        return -- Skip attacks that would be detected as impossible
-    end
+    -- Quick validation
+    local model = entry.model
+    local head = entry.head
+    if not model or not model.Parent or not head or not head.Parent then return end
+    
+    -- Get attack position
+    local attackPos = head.Position
+    if not attackPos then return end
     
     -- Register this attack for rate limiting
     KillAura_registerAttack()
@@ -8072,30 +8521,45 @@ local function KillAura_performFastAttack(meleeTool, primaryRemote, entry, isBay
         _G.MarkRemoteProtected(primaryRemote)
     end
     
+    -- Use SafeFireServer with realistic timing between actions
+    local isAxe = meleeTool.Name == "Axe"
+    
     pcall(function()
-        -- Validate entry still exists
-        if not entry.model or not entry.model.Parent then return end
-        if not attackPos then return end
-        
-        -- Axe specific logic
-        if meleeTool.Name == "Axe" and entry.head and entry.head.Parent then
+        if isAxe then
             _G.SafeFireServer(primaryRemote, "BraceBlock")
+            task.wait(0.02)
             _G.SafeFireServer(primaryRemote, "StopBraceBlock")
-            _G.SafeFireServer(primaryRemote, "FeedbackStun", entry.model, entry.head.Position)
+            task.wait(0.02)
+            _G.SafeFireServer(primaryRemote, "FeedbackStun", model, attackPos)
         end
         
         if isBayonet then
             _G.SafeFireServer(primaryRemote, "ThrustBayonet")
-            if entry.model and entry.model.Parent then
-                _G.SafeFireServer(primaryRemote, "Bayonet_HitZombie", entry.model, attackPos, true)
+            task.wait(KILLAURA_SWING_TO_HIT_DELAY) -- Delay between thrust and hit
+            if model and model.Parent then -- Re-validate
+                _G.SafeFireServer(primaryRemote, "Bayonet_HitZombie", model, attackPos, true)
             end
         else
             _G.SafeFireServer(primaryRemote, "Swing", "Thrust")
-            if entry.model and entry.model.Parent then
-                _G.SafeFireServer(primaryRemote, "HitZombie", entry.model, attackPos, true, Vector3.new(0, 15, 0), "Head", Vector3.new(0, 1, 0))
+            task.wait(KILLAURA_SWING_TO_HIT_DELAY) -- Delay between swing and hit
+            if model and model.Parent then -- Re-validate
+                _G.SafeFireServer(primaryRemote, "HitZombie", model, attackPos, true, Vector3.new(0, 15, 0), "Head", Vector3.new(0, 1, 0))
             end
         end
     end)
+end
+
+-- Cached zombies folder reference for speed
+local KillAura_zombiesFolder = nil
+local KillAura_lastZombieFolderCheck = 0
+
+local function KillAura_getZombiesFolder()
+    local now = tick()
+    if now - KillAura_lastZombieFolderCheck > 2 then
+        KillAura_zombiesFolder = Workspace:FindFirstChild("Zombies")
+        KillAura_lastZombieFolderCheck = now
+    end
+    return KillAura_zombiesFolder
 end
 
 local function KillAura_performKillAura(hrp)
@@ -8112,42 +8576,101 @@ local function KillAura_performKillAura(hrp)
     local effectiveRange = KillAura_getWeaponRange(meleeTool)
     local rangeSq = effectiveRange * effectiveRange
 
-    -- Direct scan - no cache
-    local targets = {}
-    local zombiesFolder = Workspace:FindFirstChild("Zombies")
+    -- Use cached zombies folder
+    local zombiesFolder = KillAura_getZombiesFolder()
     if not zombiesFolder then return end
     
-    for _, model in ipairs(zombiesFolder:GetDescendants()) do
-        if model:IsA("Model") and not KillAura_shouldSkipZombie(model) then
-            local head = KillAura_findHead(model)
-            if head then
-                local d2 = KillAura_distSq(head.Position, hrpPos)
-                if d2 <= rangeSq then
-                    targets[#targets + 1] = { model = model, head = head, d2 = d2 }
+    -- Optimized target collection with pre-allocated table
+    local targets = {}
+    local targetCount = 0
+    local maxTargets = KillAuraMultiTargets or 5
+    
+    -- Use GetChildren on Zombies folder (faster than GetDescendants for direct children)
+    for _, model in ipairs(zombiesFolder:GetChildren()) do
+        if model:IsA("Model") then
+            -- Inline skip check for speed (with nil safety)
+            local shouldSkip = false
+            if IgnoreSpawningZombies then
+                local agent = model:FindFirstChild("Agent")
+                if agent then
+                    local state = agent:FindFirstChild("State")
+                    if state and state:IsA("StringValue") and state.Value == "Spawn" then
+                        shouldSkip = true
+                    end
+                end
+            end
+            
+            if not shouldSkip then
+                -- Check zombie type selection
+                local zombieType = KillAura_getZombieType(model)
+                if not zombieType or KillAura_SelectedZombieTypes[zombieType] then
+                    local head = model:FindFirstChild("Head") or model:FindFirstChild("HumanoidRootPart")
+                    if head then
+                        local headPos = head.Position
+                        local dx, dy, dz = headPos.X - hrpPos.X, headPos.Y - hrpPos.Y, headPos.Z - hrpPos.Z
+                        local d2 = dx*dx + dy*dy + dz*dz
+                        if d2 <= rangeSq then
+                            targetCount = targetCount + 1
+                            targets[targetCount] = { model = model, head = head, d2 = d2 }
+                            -- Early exit if we have enough targets
+                            if targetCount >= maxTargets * 2 then break end
+                        end
+                    end
                 end
             end
         end
     end
 
-    if #targets == 0 then return end
-    table.sort(targets, function(a, b) return a.d2 < b.d2 end)
-
-    local maxTargets = math.min(KillAuraMultiTargets or 1, #targets)
-    local firstTarget = targets[1]
+    if targetCount == 0 then return end
     
-    for i = 1, maxTargets do
-        local entry = targets[i]
-        if not entry then break end
-        
-        -- Fast mode attack (pass hrpPos for distance validation)
-        KillAura_performFastAttack(meleeTool, primaryRemote, entry, isBayonet, hrpPos)
+    -- Only sort if we have more targets than needed
+    if targetCount > maxTargets then
+        table.sort(targets, function(a, b) return a.d2 < b.d2 end)
     end
 
-    if KillAuraAutoLook and firstTarget then
-        local targetPos = firstTarget.head.Position
-        local hrpPosNow = hrp.Position
-        local lookAt = Vector3.new(targetPos.X, hrpPosNow.Y, targetPos.Z)
-        pcall(function() hrp.CFrame = CFrame.new(hrpPosNow, lookAt) end)
+    local attackCount = math.min(maxTargets, targetCount)
+    local firstTarget = targets[1]
+    
+    -- Batch attack all targets (no delay between)
+    for i = 1, attackCount do
+        local entry = targets[i]
+        if entry then
+            KillAura_performFastAttack(meleeTool, primaryRemote, entry, isBayonet, hrpPos)
+        end
+    end
+
+    -- Auto-look using BodyGyro (doesn't affect movement at all)
+    if KillAuraAutoLook and firstTarget and firstTarget.head and firstTarget.head.Parent then
+        pcall(function()
+            local targetPos = firstTarget.head.Position
+            -- Calculate look direction (Y-axis only - horizontal rotation)
+            local lookAt = Vector3.new(targetPos.X, hrpPos.Y, targetPos.Z)
+            local direction = (lookAt - hrpPos)
+            
+            if direction.Magnitude > 0.1 then
+                -- Find or create our AutoLook BodyGyro
+                local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
+                if not autoLookGyro then
+                    autoLookGyro = Instance.new("BodyGyro")
+                    autoLookGyro.Name = "KatchiAutoLookGyro"
+                    autoLookGyro.MaxTorque = Vector3.new(0, 1e6, 0) -- Only Y-axis rotation
+                    autoLookGyro.P = 50000
+                    autoLookGyro.D = 1000
+                    autoLookGyro.Parent = hrp
+                end
+                
+                -- Set target rotation
+                autoLookGyro.CFrame = CFrame.lookAt(hrpPos, hrpPos + direction.Unit)
+            end
+        end)
+    else
+        -- Clean up BodyGyro when auto-look is disabled or no target
+        pcall(function()
+            local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
+            if autoLookGyro then
+                autoLookGyro:Destroy()
+            end
+        end)
     end
 end
 
@@ -8224,14 +8747,12 @@ end
 
 -- Heartbeat loop - continuous (deferred to prevent load freeze)
 local KillAura_nextTick = 0
+
 task.defer(function()
     task.wait(0.5) -- Stagger start
     RunService.Heartbeat:Connect(function()
         -- PERFORMANCE: Skip entirely if both features are disabled
         if not KillAuraEnabled and not KillAura_HitboxExpanderEnabled then return end
-        
-        -- PERFORMANCE: Mark feature as active when running
-        if _G.KatchiPerf then _G.KatchiPerf.markActive("KillAura") end
         
         local char = LocalPlayer.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -8240,29 +8761,36 @@ task.defer(function()
         -- Pause while grabbed/pinned
         if KillAura_isPinnedOrGrabbed() then return end
 
-        -- Attack speed throttle based on speed mode preset
         local now = tick()
+        
+        -- Attack speed throttle
         if now < KillAura_nextTick then return end
         
-        -- Calculate delay based on speed mode preset
+        -- Calculate delay based on attack speed
         local baseDelay = KillAuraAttackSpeed
-        if KillAuraSpeedMode == "Fast" then
-            baseDelay = 0.1
-        elseif KillAuraSpeedMode == "Random" then
-            baseDelay = 0.1 + (math.random() * 0.1) -- 0.1-0.2s
-        elseif KillAuraSpeedMode == "Slow" then
-            baseDelay = 0.5
-        elseif KillAuraSpeedMode == "Slow + Random" then
-            baseDelay = 0.45 + (math.random() * 0.15) -- 0.45-0.6s
+        
+        -- ALWAYS add some randomness for anti-detection (looks more human)
+        if KILLAURA_RANDOMIZE_DELAY then
+            -- Add 10-30% random variation
+            local variation = baseDelay * (0.1 + KillAuraRandomness * 0.2)
+            baseDelay = baseDelay + (math.random() * variation * 2 - variation)
         end
+        
+        -- Ensure minimum delay for safety
+        baseDelay = math.max(baseDelay, KILLAURA_MIN_DELAY)
         
         KillAura_nextTick = now + baseDelay
 
-        -- Scan remotes periodically (reduced frequency)
+        -- Scan remotes periodically
         if now - KillAura_lastRemoteScan > 5 then KillAura_ScanRemotesNow() end
 
-        KillAura_performAutoHead(hrp)
-        KillAura_performKillAura(hrp)
+        -- Execute attacks
+        if KillAura_HitboxExpanderEnabled then
+            KillAura_performAutoHead(hrp)
+        end
+        if KillAuraEnabled then
+            KillAura_performKillAura(hrp)
+        end
     end)
 end)
 
@@ -10350,16 +10878,27 @@ do -- // Dracula (New) — auto melee remote scanner + robust ESP (Dracula + Sil
         end
     end
 
+    -- Debounce remote scanning to prevent lag when spamming equip/unequip
+    local Dracula_scanDebounce = false
+    local function Dracula_DebouncedScan()
+        if Dracula_scanDebounce then return end
+        Dracula_scanDebounce = true
+        task.delay(0.15, function()
+            Dracula_scanDebounce = false
+            ScanDraculaRemotes()
+        end)
+    end
+    
     -- initial scan + hooks
     if LocalPlayer.Character then ScanDraculaRemotes() end
     LocalPlayer.CharacterAdded:Connect(function(char)
         task.wait(0.5)
         ScanDraculaRemotes()
         char.ChildAdded:Connect(function(c)
-            if c and c:IsA("Tool") then task.delay(0.05, ScanDraculaRemotes) end
+            if c and c:IsA("Tool") then Dracula_DebouncedScan() end
         end)
         char.ChildRemoved:Connect(function(c)
-            if c and c:IsA("Tool") then task.delay(0.05, ScanDraculaRemotes) end
+            if c and c:IsA("Tool") then Dracula_DebouncedScan() end
         end)
     end)
 
@@ -10749,22 +11288,22 @@ do -- // Players Tab
         Opened = false
     })
 
-    -- flags
-    local ChamsESPEnabled = false
-    local BillboardESPEnabled = false
-    local NotifyLowHealthEnabled = false
+    -- flags (global for config save/load)
+    ChamsESPEnabled = false
+    BillboardESPEnabled = false
+    NotifyLowHealthEnabled = false
     -- Use weak keys so entries for players who left are garbage collected
     local PlayerESPData = setmetatable({}, { __mode = "k" })
 
-    -- New toggles for bars (default OFF)
-    local ShowHealthBarEnabled = false
-    local ShowInfectionBarEnabled = false
+    -- New toggles for bars (default OFF) - global for config
+    ShowHealthBarEnabled = false
+    ShowInfectionBarEnabled = false
 
-    -- Configuration variables
-    local ChamsFillTransparency = 0.45
-    local PerformanceModeEnabled = false
-    local BillboardShowDistance = 5 -- Slider value for "too close" fade
-    local NotifyGrabbedPinnedEnabled = false
+    -- Configuration variables - global for config
+    ChamsFillTransparency = 0.45
+    PerformanceModeEnabled = false
+    BillboardShowDistance = 5 -- Slider value for "too close" fade
+    NotifyGrabbedPinnedEnabled = false
 
     -- CONFIG (tweak to taste)
     local BILLBOARD_MAX_DISTANCE = 150 -- Roblox's native MaxDistance
@@ -11441,9 +11980,20 @@ do -- // Players Tab
         end
     end
 
+    -- PERFORMANCE: Throttle Player ESP updates
+    local playerESPLastUpdate = 0
+    local PLAYER_ESP_UPDATE_INTERVAL = 0.15 -- Update every 0.15 seconds
+    
     task.defer(function()
         task.wait(1) -- Stagger start
-        RunService.Heartbeat:Connect(UpdateESPLoop)
+        RunService.Heartbeat:Connect(function()
+            -- PERFORMANCE: Throttle updates
+            local now = tick()
+            if now - playerESPLastUpdate < PLAYER_ESP_UPDATE_INTERVAL then return end
+            playerESPLastUpdate = now
+            
+            UpdateESPLoop()
+        end)
     end)
 
     Players.PlayerRemoving:Connect(RemovePlayerESP)
@@ -12420,8 +12970,9 @@ end -- end of Headless Horseman Tab
 
 task.wait(0.1) -- Delay to prevent lag
 do -- // Configs & Theme Tab
-    -- ====== Universal Config System (compatible with all executors including Arceus X) ======
-    -- Uses writefile/readfile with workspace folder for maximum compatibility
+    -- ====== WindUI Built-in Config System ======
+    -- Uses WindUI's Flag-based auto-save/load system
+    -- All UI elements with Flag="..." are automatically saved
     
     local skibiTab = Others1Section:Tab({
         Title = "Profiles",
@@ -12429,317 +12980,13 @@ do -- // Configs & Theme Tab
         Locked = false,
     })
 
--- ===== UNIVERSAL FILE SYSTEM FOR ALL EXECUTORS =====
-local KATCHI_CONFIG_FOLDER = "KatchiHub"
-local KATCHI_CONFIG_PREFIX = "KatchiConfig_"
+-- ===== WindUI Built-in Config System =====
+-- Uses WindUI's ConfigManager which handles file operations internally
+-- All UI elements with Flag="..." are automatically saved/loaded
 
--- Check what file functions are available
-local hasWriteFile = type(writefile) == "function"
-local hasReadFile = type(readfile) == "function"
-local hasListFiles = type(listfiles) == "function"
-local hasIsFile = type(isfile) == "function"
-local hasDelFile = type(delfile) == "function"
-local hasMakeFolder = type(makefolder) == "function"
-
--- Fallback: Some executors use different function names
-if not hasWriteFile then
-    pcall(function() hasWriteFile = type(writefile) == "function" or type(syn and syn.writefile) == "function" end)
-end
-if not hasReadFile then
-    pcall(function() hasReadFile = type(readfile) == "function" or type(syn and syn.readfile) == "function" end)
-end
-
--- Wrapper functions for cross-executor compatibility
-local function SafeWriteFile(path, content)
-    local success = false
-    -- Try standard writefile
-    pcall(function()
-        writefile(path, content)
-        success = true
-    end)
-    -- Try syn.writefile (Synapse)
-    if not success then
-        pcall(function()
-            if syn and syn.writefile then
-                syn.writefile(path, content)
-                success = true
-            end
-        end)
-    end
-    return success
-end
-
-local function SafeReadFile(path)
-    local content = nil
-    -- Try standard readfile
-    pcall(function()
-        content = readfile(path)
-    end)
-    -- Try syn.readfile (Synapse)
-    if not content then
-        pcall(function()
-            if syn and syn.readfile then
-                content = syn.readfile(path)
-            end
-        end)
-    end
-    return content
-end
-
-local function SafeIsFile(path)
-    local exists = false
-    pcall(function()
-        if isfile then
-            exists = isfile(path)
-        else
-            -- Fallback: try to read and see if it works
-            local content = SafeReadFile(path)
-            exists = content ~= nil
-        end
-    end)
-    return exists
-end
-
-local function SafeDelFile(path)
-    local success = false
-    pcall(function()
-        if delfile then
-            delfile(path)
-            success = true
-        end
-    end)
-    return success
-end
-
-local function SafeMakeFolder(path)
-    local success = false
-    pcall(function()
-        if makefolder then
-            makefolder(path)
-            success = true
-        end
-    end)
-    return success
-end
-
-local function SafeListFiles(folder)
-    local files = {}
-    pcall(function()
-        if listfiles then
-            files = listfiles(folder)
-        end
-    end)
-    return files
-end
-
--- Ensure config folder exists
-pcall(function() SafeMakeFolder(KATCHI_CONFIG_FOLDER) end)
-
--- Get config file path
-local function GetConfigPath(name)
-    return KATCHI_CONFIG_FOLDER .. "/" .. KATCHI_CONFIG_PREFIX .. tostring(name) .. ".json"
-end
-
--- Universal config storage (collect all toggle states)
-local function CollectCurrentConfig()
-    local config = {}
-    
-    -- Collect all toggle states from global registry
-    if _G.KatchiToggleElements then
-        for name, toggle in pairs(_G.KatchiToggleElements) do
-            pcall(function()
-                if toggle and toggle.GetValue then
-                    config[name] = toggle:GetValue()
-                elseif toggle and toggle.Value ~= nil then
-                    config[name] = toggle.Value
-                end
-            end)
-        end
-    end
-    
-    -- Collect global state variables
-    pcall(function() config.KillAuraEnabled = KillAuraEnabled end)
-    pcall(function() config.KillAuraRange = KillAuraRange end)
-    pcall(function() config.KillAuraSpeedMode = KillAuraSpeedMode end)
-    pcall(function() config.HeadHitEnabled = HeadHitEnabled end)
-    pcall(function() config.hitboxEnabled = hitboxEnabled end)
-    pcall(function() config.hitboxSize = hitboxSize end)
-    pcall(function() config.AntiGrabEnabled = AntiGrabEnabled end)
-    pcall(function() config.ShoveAuraEnabled = ShoveAuraEnabled end)
-    pcall(function() config.ShoveHitboxExpanderEnabled = ShoveHitboxExpanderEnabled end)
-    pcall(function() config.USER_AUTO_SHOOT_TOGGLE = USER_AUTO_SHOOT_TOGGLE end)
-    pcall(function() config.AUTO_SAVE_PLAYERS_ENABLED = AUTO_SAVE_PLAYERS_ENABLED end)
-    pcall(function() config.SILENT_AIM_ENABLED = SILENT_AIM_ENABLED end)
-    pcall(function() config.AutoRemoveHorsesEnabled = AutoRemoveHorsesEnabled end)
-    pcall(function() config.USE_FOV = USE_FOV end)
-    pcall(function() config.SHOW_FOV = SHOW_FOV end)
-    
-    return config
-end
-
--- Apply loaded config
-local function ApplyConfig(config)
-    if type(config) ~= "table" then return false end
-    
-    -- Apply to toggle elements
-    if _G.KatchiToggleElements then
-        for name, value in pairs(config) do
-            pcall(function()
-                local toggle = _G.KatchiToggleElements[name]
-                if toggle then
-                    if toggle.SetValue then
-                        toggle:SetValue(value)
-                    elseif toggle.Set then
-                        toggle:Set(value)
-                    end
-                end
-            end)
-        end
-    end
-    
-    -- Apply global variables
-    pcall(function() if config.KillAuraEnabled ~= nil then KillAuraEnabled = config.KillAuraEnabled end end)
-    pcall(function() if config.KillAuraRange ~= nil then KillAuraRange = config.KillAuraRange end end)
-    pcall(function() if config.KillAuraSpeedMode ~= nil then KillAuraSpeedMode = config.KillAuraSpeedMode end end)
-    pcall(function() if config.HeadHitEnabled ~= nil then HeadHitEnabled = config.HeadHitEnabled end end)
-    pcall(function() if config.hitboxEnabled ~= nil then hitboxEnabled = config.hitboxEnabled end end)
-    pcall(function() if config.hitboxSize ~= nil then hitboxSize = config.hitboxSize end end)
-    pcall(function() if config.AntiGrabEnabled ~= nil then AntiGrabEnabled = config.AntiGrabEnabled end end)
-    pcall(function() if config.ShoveAuraEnabled ~= nil then ShoveAuraEnabled = config.ShoveAuraEnabled end end)
-    pcall(function() if config.ShoveHitboxExpanderEnabled ~= nil then ShoveHitboxExpanderEnabled = config.ShoveHitboxExpanderEnabled end end)
-    pcall(function() if config.USER_AUTO_SHOOT_TOGGLE ~= nil then USER_AUTO_SHOOT_TOGGLE = config.USER_AUTO_SHOOT_TOGGLE end end)
-    pcall(function() if config.AUTO_SAVE_PLAYERS_ENABLED ~= nil then AUTO_SAVE_PLAYERS_ENABLED = config.AUTO_SAVE_PLAYERS_ENABLED end end)
-    pcall(function() if config.SILENT_AIM_ENABLED ~= nil then SILENT_AIM_ENABLED = config.SILENT_AIM_ENABLED end end)
-    pcall(function() if config.AutoRemoveHorsesEnabled ~= nil then AutoRemoveHorsesEnabled = config.AutoRemoveHorsesEnabled end end)
-    pcall(function() if config.USE_FOV ~= nil then USE_FOV = config.USE_FOV end end)
-    pcall(function() if config.SHOW_FOV ~= nil then SHOW_FOV = config.SHOW_FOV end end)
-    
-    return true
-end
-
--- Get all saved config names (universal)
-local function GetAllUniversalConfigs()
-    local configs = {}
-    
-    -- Method 1: Use listfiles if available
-    local files = SafeListFiles(KATCHI_CONFIG_FOLDER)
-    for _, path in ipairs(files) do
-        local name = path:match(KATCHI_CONFIG_PREFIX .. "(.+)%.json$")
-        if name then
-            table.insert(configs, name)
-        end
-    end
-    
-    -- Method 2: Also try WindUI's ConfigManager as fallback
-    if #configs == 0 and Window and Window.ConfigManager then
-        pcall(function()
-            local list = Window.ConfigManager:AllConfigs()
-            if type(list) == "table" then
-                for _, v in ipairs(list) do
-                    table.insert(configs, tostring(v))
-                end
-            end
-        end)
-    end
-    
-    return configs
-end
-
--- Save config (universal)
-local function SaveUniversalConfig(name)
-    if not name or name == "" then return false, "No name provided" end
-    
-    local config = CollectCurrentConfig()
-    local json = nil
-    
-    pcall(function()
-        json = HttpService:JSONEncode(config)
-    end)
-    
-    if not json then return false, "Failed to encode config" end
-    
-    -- Try file system first (works on most executors)
-    local path = GetConfigPath(name)
-    local success = SafeWriteFile(path, json)
-    
-    if success then
-        return true, "Saved to workspace"
-    end
-    
-    -- Fallback: Try WindUI's ConfigManager
-    if Window and Window.ConfigManager then
-        local ok = false
-        pcall(function()
-            local cfg = Window.ConfigManager:CreateConfig(name)
-            if cfg then
-                cfg:Save()
-                ok = true
-            end
-        end)
-        if ok then return true, "Saved via ConfigManager" end
-    end
-    
-    return false, "File system not available"
-end
-
--- Load config (universal)
-local function LoadUniversalConfig(name)
-    if not name or name == "" then return false, "No name provided" end
-    
-    -- Try file system first
-    local path = GetConfigPath(name)
-    local content = SafeReadFile(path)
-    
-    if content then
-        local config = nil
-        pcall(function()
-            config = HttpService:JSONDecode(content)
-        end)
-        
-        if config then
-            ApplyConfig(config)
-            return true, "Loaded from workspace"
-        end
-    end
-    
-    -- Fallback: Try WindUI's ConfigManager
-    if Window and Window.ConfigManager then
-        local ok = false
-        pcall(function()
-            local cfg = Window.ConfigManager:CreateConfig(name)
-            if cfg then
-                cfg:Load()
-                ok = true
-            end
-        end)
-        if ok then return true, "Loaded via ConfigManager" end
-    end
-    
-    return false, "Config not found"
-end
-
--- Delete config (universal)
-local function DeleteUniversalConfig(name)
-    if not name or name == "" then return false end
-    
-    local path = GetConfigPath(name)
-    SafeDelFile(path)
-    
-    -- Also try WindUI's ConfigManager
-    pcall(function()
-        if Window and Window.ConfigManager then
-            local cfg = Window.ConfigManager:CreateConfig(name)
-            if cfg then cfg:Delete() end
-        end
-    end)
-    
-    return true
-end
-
--- ===== UI SECTION =====
-local ConfigManager = Window and Window.ConfigManager or nil
+local ConfigManager = Window.ConfigManager
 local ConfigSection = skibiTab:Section({
-    Title = "Configs (Universal)",
+    Title = "Configs",
     Icon = "file-plus",
     Opened = true
 })
@@ -12752,68 +12999,37 @@ local overwriteExisting = true
 local function notify(title, content, icon, dur)
     if WindUI then
         pcall(function() WindUI:Notify({ Title = title or "Config", Content = content or "", Icon = icon or "save", Duration = dur or 2 }) end)
-    else
-        pcall(function() print(("[%s] %s"):format(title or "Config", content or "")) end)
     end
 end
 
 local function GetAllConfigsSafe()
-    return GetAllUniversalConfigs()
+    local ok, list = pcall(function() return ConfigManager:AllConfigs() end)
+    if not ok or type(list) ~= "table" then return {} end
+    local out = {}
+    for _, v in ipairs(list) do table.insert(out, tostring(v)) end
+    return out
 end
 
 local function RefreshConfigsDropdown()
     local list = GetAllConfigsSafe()
     if selectedProfile and not table.find(list, selectedProfile) then selectedProfile = nil end
-    
-    local newValue = selectedProfile or list[1] or ""
 
     if ConfigDropdown then
-        local success = pcall(function()
-            -- Try multiple update methods for different executor compatibility
-            if ConfigDropdown.SetValues then 
-                ConfigDropdown:SetValues(list)
-                ConfigDropdown.Value = newValue
-                return true
-            end
-            
-            if ConfigDropdown.SetOptions then 
-                ConfigDropdown:SetOptions(list)
-                ConfigDropdown.Value = newValue
-                return true
-            end
-            
-            if ConfigDropdown.Update then 
-                ConfigDropdown:Update(list)
-                ConfigDropdown.Value = newValue
-                return true
-            end
-            
-            if ConfigDropdown.Refresh then 
-                ConfigDropdown:Refresh(list)
-                ConfigDropdown.Value = newValue
-                return true
-            end
-            
-            -- Final fallback: Direct property manipulation
+        pcall(function()
+            if ConfigDropdown.SetValues then ConfigDropdown:SetValues(list); return end
+            if ConfigDropdown.SetOptions then ConfigDropdown:SetOptions(list); return end
+            if ConfigDropdown.Update then ConfigDropdown:Update(list); return end
+            if ConfigDropdown.Refresh then ConfigDropdown:Refresh(list); return end
             ConfigDropdown.Values = list
-            ConfigDropdown.Value = newValue
-            
-            -- Try to force UI update
-            if ConfigDropdown.SetValue then
-                ConfigDropdown:SetValue(newValue)
-            end
+            ConfigDropdown.Value = selectedProfile or list[1] or nil
         end)
-        
-        if not success then
-            notify("Config", "Dropdown refresh failed, try manual refresh", "alert-triangle", 2)
-        end
     end
 end
 
 -- textbox for entering profile name
 ConfigSection:Input({
     Title = "Profile Name",
-    Desc = "Enter a name for the config (saves to workspace/KatchiHub folder)",
+    Desc = "Enter a name for the config",
     Placeholder = "default",
     Callback = function(val)
         if val and tostring(val):match("%S") then
@@ -12822,20 +13038,10 @@ ConfigSection:Input({
     end
 })
 
--- Toggle for overwrite option
-ConfigSection:Toggle({
-    Title = "Allow Overwrite",
-    Desc = "If enabled, saving will overwrite existing profiles",
-    Default = true,
-    Callback = function(state)
-        overwriteExisting = state
-    end
-})
-
--- Save button (Universal - works on all executors)
+-- Save button
 ConfigSection:Button({
     Title = "Save Profile",
-    Desc = "Save Config to workspace (works on Arceus X, Fluxus, etc.)",
+    Desc = "Save all current settings to a profile",
     Callback = function()
         local name = tostring(profileName or ""):gsub("^%s+", ""):gsub("%s+$", "")
         if name == "" then notify("Config", "Enter a profile name first", "alert-circle", 2); return end
@@ -12848,15 +13054,24 @@ ConfigSection:Button({
             return
         end
 
-        -- Use universal save system
-        local success, msg = SaveUniversalConfig(name)
-        if success then
-            notify("Config", ("Saved '%s' (%s)"):format(name, msg or ""), "check", 2)
+        -- Create config object
+        local ok, cfg = pcall(function() return ConfigManager:CreateConfig(name) end)
+        if not ok or not cfg then notify("Config", "Failed to create config object", "x", 2); return end
+
+        -- If exists and we want to overwrite, delete first then recreate
+        if exists and overwriteExisting then
+            pcall(function() cfg:Delete() end)
+            local ok2, cfg2 = pcall(function() return ConfigManager:CreateConfig(name) end)
+            if ok2 and cfg2 then cfg = cfg2 end
+        end
+
+        local suc = pcall(function() cfg:Save() end)
+        if suc then
+            notify("Config", ("Saved '%s' ✓"):format(name), "check", 2)
             selectedProfile = name
-            task.wait(0.1)
             RefreshConfigsDropdown()
         else
-            notify("Config", ("Failed to save '%s': %s"):format(name, msg or "Unknown error"), "x", 2)
+            notify("Config", ("Failed to save '%s'"):format(name), "x", 2)
         end
     end
 })
@@ -12872,32 +13087,44 @@ ConfigDropdown = ConfigSection:Dropdown({
     end
 })
 
--- Load button (Universal)
+-- Load button
 ConfigSection:Button({
     Title = "Load Selected",
-    Desc = "Load The Selected Config from workspace",
+    Desc = "Load The Selected Config",
     Callback = function()
-        if not selectedProfile or tostring(selectedProfile) == "" then notify("Config", "Select a profile first", "alert-circle", 2); return end
+        if not selectedProfile or tostring(selectedProfile) == "" then 
+            notify("Config", "Select a profile first", "alert-circle", 2)
+            return 
+        end
         
-        local success, msg = LoadUniversalConfig(selectedProfile)
-        if success then
-            notify("Config", ("Loaded '%s' (%s)"):format(selectedProfile, msg or ""), "download", 2)
+        local ok, cfg = pcall(function() return ConfigManager:CreateConfig(selectedProfile) end)
+        if not ok or not cfg then notify("Config", "Failed to create config object", "x", 2); return end
+        
+        local suc = pcall(function() cfg:Load() end)
+        if suc then
+            notify("Config", ("Loaded '%s' ✓"):format(selectedProfile), "download", 2)
             RefreshConfigsDropdown()
         else
-            notify("Config", ("Failed to load '%s': %s"):format(selectedProfile, msg or "Not found"), "x", 2)
+            notify("Config", ("Failed to load '%s'"):format(selectedProfile), "x", 2)
         end
     end
 })
 
--- Delete button (Universal)
+-- Delete button
 ConfigSection:Button({
     Title = "Delete Selected",
-    Desc = "Delete the selected Config from workspace",
+    Desc = "Delete the selected Config",
     Callback = function()
-        if not selectedProfile or tostring(selectedProfile) == "" then notify("Config", "Select a profile first", "alert-circle", 2); return end
+        if not selectedProfile or tostring(selectedProfile) == "" then 
+            notify("Config", "Select a profile first", "alert-circle", 2)
+            return 
+        end
         
-        local success = DeleteUniversalConfig(selectedProfile)
-        if success then
+        local ok, cfg = pcall(function() return ConfigManager:CreateConfig(selectedProfile) end)
+        if not ok or not cfg then notify("Config", "Failed to create config object", "x", 2); return end
+        
+        local suc = pcall(function() cfg:Delete() end)
+        if suc then
             notify("Config", ("Deleted '%s'"):format(selectedProfile), "trash", 2)
             selectedProfile = nil
             RefreshConfigsDropdown()
@@ -12907,13 +13134,23 @@ ConfigSection:Button({
     end
 })
 
--- Manual refresh button
+-- Refresh button
 ConfigSection:Button({
     Title = "Refresh List",
     Desc = "Refresh the dropdown of saved Configs",
     Callback = function()
         RefreshConfigsDropdown()
         notify("Config", "Refreshed list", "refresh-cw", 1.3)
+    end
+})
+
+-- Overwrite toggle
+ConfigSection:Toggle({
+    Title = "Overwrite Existing",
+    Desc = "Allow overwriting configs with the same name",
+    Value = overwriteExisting,
+    Callback = function(val)
+        overwriteExisting = val
     end
 })
 
@@ -13131,68 +13368,102 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         local allAnimations = {}
         local animationDropdown = nil
         local animSearchQuery = ""
+        local scanStatusParagraph = nil
+        local hasInitialScan = false -- PERFORMANCE: Lazy load - don't scan until user interacts
         
-        -- Scan all animations in the game
+        -- Global seen IDs to prevent duplicates across scans
+        local globalSeenIds = {}
+        
+        -- Normalize animation ID for comparison (extract numeric ID)
+        local function normalizeAnimIdForScan(id)
+            if not id then return nil end
+            local numId = tostring(id):match("(%d+)")
+            return numId
+        end
+        
+        -- Scan all animations in the game (PERFORMANCE: chunked processing to prevent freezing)
         local function scanAllAnimations()
             local anims = {}
             local seen = {}
+            local processedCount = 0
+            local CHUNK_SIZE = 200 -- Process 200 instances per frame to prevent freezing
+            
+            -- Helper to add animation if not seen
+            local function addAnim(name, id)
+                if not id or id == "" then return end
+                local normId = normalizeAnimIdForScan(id)
+                if normId and not seen[normId] then
+                    seen[normId] = true
+                    table.insert(anims, {name = name or "Unknown", id = id, normId = normId})
+                end
+            end
+            
+            -- Helper to scan a container with chunking
+            local function scanContainer(container)
+                pcall(function()
+                    local descendants = container:GetDescendants()
+                    for i, desc in ipairs(descendants) do
+                        pcall(function()
+                            if desc:IsA("Animation") and desc.AnimationId and desc.AnimationId ~= "" then
+                                addAnim(desc.Name, desc.AnimationId)
+                            end
+                            -- Check Animator for playing animations
+                            if desc:IsA("Animator") then
+                                pcall(function()
+                                    for _, track in ipairs(desc:GetPlayingAnimationTracks()) do
+                                        if track.Animation then
+                                            addAnim(track.Animation.Name or "Playing", track.Animation.AnimationId)
+                                        end
+                                    end
+                                end)
+                            end
+                        end)
+                        
+                        -- Yield every CHUNK_SIZE instances to prevent freezing
+                        processedCount = processedCount + 1
+                        if processedCount % CHUNK_SIZE == 0 then
+                            task.wait()
+                        end
+                    end
+                end)
+            end
+            
+            -- Scan Workspace (includes all players, models, everything)
+            scanContainer(workspace)
             
             -- Scan ReplicatedStorage
-            pcall(function()
-                for _, desc in ipairs(game:GetService("ReplicatedStorage"):GetDescendants()) do
-                    if desc:IsA("Animation") and desc.AnimationId and desc.AnimationId ~= "" then
-                        local id = desc.AnimationId
-                        if not seen[id] then
-                            seen[id] = true
-                            table.insert(anims, {name = desc.Name, id = id})
-                        end
-                    end
-                end
-            end)
+            pcall(function() scanContainer(game:GetService("ReplicatedStorage")) end)
             
-            -- Scan Workspace
-            pcall(function()
-                for _, desc in ipairs(workspace:GetDescendants()) do
-                    if desc:IsA("Animation") and desc.AnimationId and desc.AnimationId ~= "" then
-                        local id = desc.AnimationId
-                        if not seen[id] then
-                            seen[id] = true
-                            table.insert(anims, {name = desc.Name, id = id})
-                        end
-                    end
-                end
-            end)
-            
-            -- Scan player character
-            pcall(function()
-                local char = LocalPlayer.Character
-                if char then
-                    for _, desc in ipairs(char:GetDescendants()) do
-                        if desc:IsA("Animation") and desc.AnimationId and desc.AnimationId ~= "" then
-                            local id = desc.AnimationId
-                            if not seen[id] then
-                                seen[id] = true
-                                table.insert(anims, {name = desc.Name, id = id})
-                            end
-                        end
-                    end
-                end
-            end)
+            -- Scan ReplicatedFirst
+            pcall(function() scanContainer(game:GetService("ReplicatedFirst")) end)
             
             -- Scan StarterPlayer
+            pcall(function() scanContainer(game:GetService("StarterPlayer")) end)
+            
+            -- Scan StarterGui
+            pcall(function() scanContainer(game:GetService("StarterGui")) end)
+            
+            -- Scan StarterPack
+            pcall(function() scanContainer(game:GetService("StarterPack")) end)
+            
+            -- Scan Lighting
+            pcall(function() scanContainer(game:GetService("Lighting")) end)
+            
+            -- Scan all player backpacks
             pcall(function()
-                for _, desc in ipairs(game:GetService("StarterPlayer"):GetDescendants()) do
-                    if desc:IsA("Animation") and desc.AnimationId and desc.AnimationId ~= "" then
-                        local id = desc.AnimationId
-                        if not seen[id] then
-                            seen[id] = true
-                            table.insert(anims, {name = desc.Name, id = id})
+                for _, player in ipairs(Players:GetPlayers()) do
+                    pcall(function()
+                        if player.Backpack then
+                            scanContainer(player.Backpack)
                         end
-                    end
+                    end)
                 end
             end)
             
+            -- Sort alphabetically
             table.sort(anims, function(a, b) return a.name:lower() < b.name:lower() end)
+            
+            globalSeenIds = seen
             return anims
         end
         
@@ -13204,18 +13475,19 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
             local filtered = {}
             local lowerQuery = query:lower()
             for _, anim in ipairs(allAnimations) do
-                if anim.name:lower():find(lowerQuery, 1, true) then
+                if anim.name:lower():find(lowerQuery, 1, true) or anim.id:lower():find(lowerQuery, 1, true) then
                     table.insert(filtered, anim)
                 end
             end
             return filtered
         end
         
-        -- Get dropdown values from animations (just names)
+        -- Get dropdown values from animations
         local function getAnimDropdownValues(anims)
             local values = {}
             for _, anim in ipairs(anims) do
-                table.insert(values, anim.name)
+                local shortId = anim.normId and (" [" .. anim.normId:sub(1, 8) .. "]") or ""
+                table.insert(values, anim.name .. shortId)
             end
             if #values == 0 then
                 table.insert(values, "No animations found")
@@ -13223,26 +13495,88 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
             return values
         end
         
-        -- Lookup table: name -> id
-        local animNameToId = {}
+        -- Lookup table: display name -> animation data
+        local animNameToData = {}
         local function updateAnimLookup(anims)
-            animNameToId = {}
+            animNameToData = {}
             for _, anim in ipairs(anims) do
-                animNameToId[anim.name] = anim.id
+                local shortId = anim.normId and (" [" .. anim.normId:sub(1, 8) .. "]") or ""
+                local displayName = anim.name .. shortId
+                animNameToData[displayName] = anim
             end
         end
         
-        -- Initial scan
-        allAnimations = scanAllAnimations()
-        updateAnimLookup(allAnimations)
+        -- PERFORMANCE: Lazy load - don't scan on script load, wait for user interaction
+        -- allAnimations starts empty, user must click "Scan Animations" to populate
         
         -- Track playing animation tracks for stopping
         local playingTracks = {}
         
+        -- Scan status paragraph
+        scanStatusParagraph = AnimationsSection:Paragraph({
+            Title = "Animation Count",
+            Desc = "Click 'Scan Animations' to load (prevents lag on startup)"
+        })
+        
+        -- Rescan button (now the primary way to load animations)
+        AnimationsSection:Button({
+            Title = "Scan Animations",
+            Desc = "Scan game for animations (runs in background)",
+            Callback = function()
+                -- Show scanning notification
+                WindUI:Notify({
+                    Title = "Animations",
+                    Content = "Scanning animations in background...",
+                    Duration = 2,
+                    Icon = "loader"
+                })
+                
+                -- Update status to show scanning
+                if scanStatusParagraph then
+                    pcall(function()
+                        scanStatusParagraph:SetDesc("Scanning... please wait")
+                    end)
+                end
+                
+                -- Run scan in background thread
+                task.spawn(function()
+                    allAnimations = scanAllAnimations()
+                    updateAnimLookup(allAnimations)
+                    hasInitialScan = true
+                    
+                    -- Update status
+                    if scanStatusParagraph then
+                        pcall(function()
+                            scanStatusParagraph:SetDesc("Found " .. #allAnimations .. " animations")
+                        end)
+                    end
+                    
+                    -- Update dropdown with new values
+                    if animationDropdown then
+                        pcall(function()
+                            local values = getAnimDropdownValues(filterAnimations(animSearchQuery))
+                            if animationDropdown.SetValues then
+                                animationDropdown:SetValues(values)
+                            elseif animationDropdown.Refresh then
+                                animationDropdown:Refresh(values)
+                            end
+                        end)
+                    end
+                    
+                    WindUI:Notify({
+                        Title = "Animations",
+                        Content = "Found " .. #allAnimations .. " unique animations!",
+                        Duration = 3,
+                        Icon = "check"
+                    })
+                end) -- end task.spawn
+            end
+        })
+        
         -- Search input
         AnimationsSection:Input({
             Title = "Search Animations",
-            Desc = "Filter animations by name",
+            Desc = "Filter animations by name or ID",
             Placeholder = "Type to search...",
             Callback = function(text)
                 animSearchQuery = text
@@ -13298,27 +13632,27 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
             if animDetailsParagraph then
                 if selectedAnimName and selectedAnimId then
                     local duration = getAnimationDuration(selectedAnimId)
-                    animDetailsParagraph:SetDesc(selectedAnimName .. "\n" .. selectedAnimId .. "\n" .. duration)
+                    animDetailsParagraph:SetDesc(selectedAnimName .. "\n" .. selectedAnimId .. "\nDuration: " .. duration)
                 else
                     animDetailsParagraph:SetDesc("No animation selected")
                 end
             end
         end
         
-        -- Animation dropdown
+        -- Animation dropdown (starts empty - user must scan first)
         animationDropdown = AnimationsSection:Dropdown({
             Title = "Select Animation",
             Desc = "Choose an animation to play",
             Flag = "Animations_Select",
             Multi = false,
-            Values = getAnimDropdownValues(allAnimations),
+            Values = {"Click 'Scan Animations' to load"},
             Callback = function(selected)
-                if selected and selected ~= "No animations found" then
-                    -- Get animation ID from lookup table
-                    local id = animNameToId[selected]
-                    if id then
-                        selectedAnimId = id
-                        selectedAnimName = selected
+                if selected and selected ~= "No animations found" and selected ~= "Click 'Scan Animations' to load" then
+                    -- Get animation data from lookup table
+                    local animData = animNameToData[selected]
+                    if animData then
+                        selectedAnimId = animData.id
+                        selectedAnimName = animData.name
                         updateAnimDetails()
                     end
                 end
@@ -13502,34 +13836,6 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
                     Content = "Stopped all animations!",
                     Duration = 2,
                     Icon = "square"
-                })
-            end
-        })
-        
-        -- Refresh button
-        AnimationsSection:Button({
-            Title = "Refresh Animations",
-            Desc = "Rescan all animations in the game",
-            Callback = function()
-                allAnimations = scanAllAnimations()
-                updateAnimLookup(allAnimations)
-                local filtered = filterAnimations(animSearchQuery)
-                if animationDropdown then
-                    pcall(function()
-                        if animationDropdown.SetValues then
-                            animationDropdown:SetValues(getAnimDropdownValues(filtered))
-                        elseif animationDropdown.Refresh then
-                            animationDropdown:Refresh(getAnimDropdownValues(filtered))
-                        elseif animationDropdown.UpdateValues then
-                            animationDropdown:UpdateValues(getAnimDropdownValues(filtered))
-                        end
-                    end)
-                end
-                WindUI:Notify({
-                    Title = "Animations",
-                    Content = "Found " .. #allAnimations .. " animations!",
-                    Duration = 2,
-                    Icon = "refresh-cw"
                 })
             end
         })
@@ -13782,7 +14088,7 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
     end -- End Old Guard scope
 
     -- === COLDSTREAM TEMPORARY SECTION (British) ===
-    local ColdStreamSection = MiscTab:Section({ Title = "Temporary ColdStream", Icon = "flag", Opened = false })
+    local ColdStreamSection = MiscTab:Section({ Title = "Temporary ColdStream (British)", Icon = "flag", Opened = false })
     
     do -- ColdStream scope
         local ChangeClassEvent = game:GetService("ReplicatedStorage").Events.Regiment.ChangeClass
@@ -15559,36 +15865,64 @@ do -- // Maps Hacks Tab
     local autoRepairBridgeEnabled = false
     local autoRepairBridgeConn = nil
     
+    -- Cache bridge reference to avoid repeated FindFirstChild calls
+    local cachedBridge = nil
+    local lastBridgeCheck = 0
+    local BRIDGE_CACHE_INTERVAL = 2 -- Re-check bridge existence every 2 seconds
+    
     local function getNearestBridgeConstruct()
         local char = LocalPlayer.Character
-        if not char or not char:FindFirstChild("HumanoidRootPart") then
-            return nil
+        if not char then return nil end
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if not root then return nil end
+        local rootPos = root.Position
+        
+        -- Cache bridge reference
+        local now = tick()
+        if now - lastBridgeCheck > BRIDGE_CACHE_INTERVAL then
+            lastBridgeCheck = now
+            cachedBridge = nil
+            pcall(function()
+                local berezina = Workspace:FindFirstChild("Berezina")
+                if berezina then
+                    local modes = berezina:FindFirstChild("Modes")
+                    if modes then
+                        local holdout = modes:FindFirstChild("Holdout")
+                        if holdout then
+                            cachedBridge = holdout:FindFirstChild("Bridge")
+                        end
+                    end
+                end
+            end)
         end
-        local root = char.HumanoidRootPart
         
-        -- Try to find the bridge
-        local bridge = nil
-        pcall(function()
-            bridge = Workspace:FindFirstChild("Berezina")
-                and Workspace.Berezina:FindFirstChild("Modes")
-                and Workspace.Berezina.Modes:FindFirstChild("Holdout")
-                and Workspace.Berezina.Modes.Holdout:FindFirstChild("Bridge")
-        end)
-        
-        if not bridge then return nil end
+        if not cachedBridge or not cachedBridge.Parent then 
+            cachedBridge = nil
+            return nil 
+        end
         
         local nearest, dist = nil, math.huge
         
-        for _, section in ipairs(bridge:GetChildren()) do
+        -- Use GetChildren once and iterate (avoids creating new table every call)
+        local sections = cachedBridge:GetChildren()
+        for i = 1, #sections do
+            local section = sections[i]
+            if not section then continue end
+            
             -- Check Posts
             local posts = section:FindFirstChild("Posts")
             if posts then
-                for _, part in ipairs(posts:GetChildren()) do
-                    if part:IsA("BasePart") and part:FindFirstChild("ConstructHealth") then
-                        local d = (part.Position - root.Position).Magnitude
-                        if d < dist then
-                            dist = d
-                            nearest = part.ConstructHealth
+                local postParts = posts:GetChildren()
+                for j = 1, #postParts do
+                    local part = postParts[j]
+                    if part and part:IsA("BasePart") then
+                        local health = part:FindFirstChild("ConstructHealth")
+                        if health then
+                            local d = (part.Position - rootPos).Magnitude
+                            if d < dist then
+                                dist = d
+                                nearest = health
+                            end
                         end
                     end
                 end
@@ -15596,21 +15930,29 @@ do -- // Maps Hacks Tab
             
             -- Check Beam
             local beam = section:FindFirstChild("Beam")
-            if beam and beam:FindFirstChild("ConstructHealth") then
-                local d = (beam.Position - root.Position).Magnitude
-                if d < dist then
-                    dist = d
-                    nearest = beam.ConstructHealth
+            if beam then
+                local beamHealth = beam:FindFirstChild("ConstructHealth")
+                if beamHealth then
+                    local d = (beam.Position - rootPos).Magnitude
+                    if d < dist then
+                        dist = d
+                        nearest = beamHealth
+                    end
                 end
             end
             
             -- Check Joists
-            for _, joists in ipairs(section:GetChildren()) do
-                if joists.Name == "Joists" and joists:FindFirstChild("ConstructHealth") then
-                    local d = (joists.Position - root.Position).Magnitude
-                    if d < dist then
-                        dist = d
-                        nearest = joists.ConstructHealth
+            local sectionChildren = section:GetChildren()
+            for j = 1, #sectionChildren do
+                local joists = sectionChildren[j]
+                if joists and joists.Name == "Joists" then
+                    local joistsHealth = joists:FindFirstChild("ConstructHealth")
+                    if joistsHealth then
+                        local d = (joists.Position - rootPos).Magnitude
+                        if d < dist then
+                            dist = d
+                            nearest = joistsHealth
+                        end
                     end
                 end
             end
@@ -15744,13 +16086,13 @@ do -- // Maps Hacks Tab
                 if autoGrabLogThread then pcall(function() task.cancel(autoGrabLogThread) end) end
                 autoGrabLogThread = task.spawn(function()
                     while autoGrabLogEnabled do
-                        pcall(function()
+                        local ok = pcall(function()
                             local logInteract = findNearestLogInteract()
-                            if logInteract then
+                            if logInteract and logInteract.Parent then
                                 _G.SafeFireServer(logInteract)
                             end
                         end)
-                        task.wait(0.1) -- Slightly slower to reduce spam
+                        task.wait(0.2) -- Slower loop to prevent lag (was 0.1)
                     end
                 end)
                 WindUI:Notify({
@@ -15769,33 +16111,79 @@ do -- // Maps Hacks Tab
     })
     _G.KatchiToggleElements.AutoGrabLog = AutoGrabLogToggle
     
-    -- Auto Place Log (optimized - caches prompts)
+    -- Auto Place Log (FIXED - no more memory leak from GetDescendants)
     local autoPlaceLogEnabled = false
     local autoPlaceLogThread = nil
-    -- Use weak values so destroyed prompts are garbage collected
-    local cachedPlaceLogPrompts = setmetatable({}, { __mode = "v" }) -- Cache prompts to avoid scanning every frame
+    local cachedPlaceLogPrompts = {} -- Simple table, cleared on disable
     local lastPromptScan = 0
-    local PROMPT_SCAN_INTERVAL = 2 -- Re-scan for new prompts every 2 seconds
+    local PROMPT_SCAN_INTERVAL = 3 -- Re-scan every 3 seconds (was 2)
+    local cachedBerezinaRef = nil -- Cache Berezina reference
     
-    -- Helper: Find nearest PlaceLog prompt
+    -- Helper: Find nearest PlaceLog prompt (optimized - no GetDescendants spam)
     local function findNearestPlaceLogPrompt()
         local char = LocalPlayer.Character
-        if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
-        local root = char.HumanoidRootPart
+        if not char then return nil end
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if not root then return nil end
+        local rootPos = root.Position
         
         local now = tick()
         
-        -- Re-scan for prompts periodically
+        -- Re-scan for prompts periodically (but much less aggressively)
         if now - lastPromptScan > PROMPT_SCAN_INTERVAL then
             lastPromptScan = now
-            cachedPlaceLogPrompts = {}
             
-            -- Only scan Berezina map area for efficiency
-            local berezina = Workspace:FindFirstChild("Berezina")
-            if berezina then
-                for _, desc in pairs(berezina:GetDescendants()) do
-                    if desc:IsA("ProximityPrompt") and desc.Name == "PlaceLogProximityPrompt" then
-                        table.insert(cachedPlaceLogPrompts, desc)
+            -- Clear old cache properly
+            for i = #cachedPlaceLogPrompts, 1, -1 do
+                cachedPlaceLogPrompts[i] = nil
+            end
+            
+            -- Cache Berezina reference
+            if not cachedBerezinaRef or not cachedBerezinaRef.Parent then
+                cachedBerezinaRef = Workspace:FindFirstChild("Berezina")
+            end
+            
+            -- Only scan if Berezina exists
+            if cachedBerezinaRef then
+                -- FIXED: Use targeted search instead of GetDescendants (which creates huge tables)
+                -- Look in known locations for PlaceLogProximityPrompt
+                local modes = cachedBerezinaRef:FindFirstChild("Modes")
+                if modes then
+                    local holdout = modes:FindFirstChild("Holdout")
+                    if holdout then
+                        local bridge = holdout:FindFirstChild("Bridge")
+                        if bridge then
+                            -- Search only bridge sections for prompts
+                            local sections = bridge:GetChildren()
+                            for i = 1, #sections do
+                                local section = sections[i]
+                                if section then
+                                    -- Check direct children and one level deep
+                                    local children = section:GetChildren()
+                                    for j = 1, #children do
+                                        local child = children[j]
+                                        if child then
+                                            -- Check for prompt on this child
+                                            local prompt = child:FindFirstChild("PlaceLogProximityPrompt")
+                                            if prompt and prompt:IsA("ProximityPrompt") then
+                                                table.insert(cachedPlaceLogPrompts, prompt)
+                                            end
+                                            -- Check grandchildren
+                                            local grandchildren = child:GetChildren()
+                                            for k = 1, #grandchildren do
+                                                local gc = grandchildren[k]
+                                                if gc then
+                                                    local gcPrompt = gc:FindFirstChild("PlaceLogProximityPrompt")
+                                                    if gcPrompt and gcPrompt:IsA("ProximityPrompt") then
+                                                        table.insert(cachedPlaceLogPrompts, gcPrompt)
+                                                    end
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
                     end
                 end
             end
@@ -15803,20 +16191,23 @@ do -- // Maps Hacks Tab
         
         -- Find nearest prompt from cache
         local nearest, nearestDist = nil, math.huge
-        for i = #cachedPlaceLogPrompts, 1, -1 do
+        local cacheSize = #cachedPlaceLogPrompts
+        for i = cacheSize, 1, -1 do
             local prompt = cachedPlaceLogPrompts[i]
             if prompt and prompt.Parent then
                 local promptPart = prompt:FindFirstAncestorWhichIsA("BasePart")
                 if promptPart then
-                    local dist = (promptPart.Position - root.Position).Magnitude
+                    local dist = (promptPart.Position - rootPos).Magnitude
                     if dist < nearestDist then
                         nearestDist = dist
                         nearest = prompt
                     end
                 end
             else
-                -- Prompt was destroyed, remove from cache
-                table.remove(cachedPlaceLogPrompts, i)
+                -- Prompt was destroyed, remove from cache (swap-remove for speed)
+                cachedPlaceLogPrompts[i] = cachedPlaceLogPrompts[cacheSize]
+                cachedPlaceLogPrompts[cacheSize] = nil
+                cacheSize = cacheSize - 1
             end
         end
         
@@ -15833,18 +16224,19 @@ do -- // Maps Hacks Tab
             if state then
                 if autoPlaceLogThread then pcall(function() task.cancel(autoPlaceLogThread) end) end
                 -- Reset cache on enable
-                cachedPlaceLogPrompts = {}
+                for i = #cachedPlaceLogPrompts, 1, -1 do cachedPlaceLogPrompts[i] = nil end
                 lastPromptScan = 0
+                cachedBerezinaRef = nil
                 
                 autoPlaceLogThread = task.spawn(function()
                     while autoPlaceLogEnabled do
-                        pcall(function()
+                        local ok = pcall(function()
                             local prompt = findNearestPlaceLogPrompt()
-                            if prompt and fireproximityprompt then
+                            if prompt and prompt.Parent and fireproximityprompt then
                                 fireproximityprompt(prompt)
                             end
                         end)
-                        task.wait(0.15) -- Slower loop, less lag
+                        task.wait(0.25) -- Slower loop to prevent lag (was 0.15)
                     end
                 end)
                 WindUI:Notify({
@@ -15858,7 +16250,9 @@ do -- // Maps Hacks Tab
                     pcall(function() task.cancel(autoPlaceLogThread) end)
                     autoPlaceLogThread = nil
                 end
-                cachedPlaceLogPrompts = {}
+                -- Properly clear cache
+                for i = #cachedPlaceLogPrompts, 1, -1 do cachedPlaceLogPrompts[i] = nil end
+                cachedBerezinaRef = nil
             end
         end
     })
@@ -15866,7 +16260,12 @@ do -- // Maps Hacks Tab
     
     -- Character respawn cleanup
     LocalPlayer.CharacterAdded:Connect(function()
-        -- Disable all features properly on respawn
+        -- Disable all features properly on respawn and clear all caches
+        
+        -- Clear bridge cache
+        cachedBridge = nil
+        lastBridgeCheck = 0
+        
         if autoRepairBridgeEnabled then
             autoRepairBridgeEnabled = false
             if autoRepairBridgeConn then
@@ -15889,7 +16288,10 @@ do -- // Maps Hacks Tab
                 pcall(function() task.cancel(autoPlaceLogThread) end)
                 autoPlaceLogThread = nil
             end
-            cachedPlaceLogPrompts = {}
+            -- Properly clear all cached data
+            for i = #cachedPlaceLogPrompts, 1, -1 do cachedPlaceLogPrompts[i] = nil end
+            cachedBerezinaRef = nil
+            lastPromptScan = 0
             if AutoPlaceLogToggle then pcall(function() AutoPlaceLogToggle:SetValue(false) end) end
         end
     end)
@@ -17257,12 +17659,12 @@ task.wait(0.1) -- Delay to prevent lag
 do -- // Final task.spawn and connects
         WindUI:Notify({
             Title = "Katchi Hub Loaded",
-            Content = "Successfully loaded Katchi Hub v4\nUse RightShift key to toggle the menu",
+            Content = "Successfully loaded Katchi Hub v4.1\nUse RightShift key to toggle the menu",
             Duration = 5,
             Icon = "zap",
         })
 
-    print("Katchi Hub v3.9 successfully loaded!")
+    print("Katchi Hub v4.1 successfully loaded!")
     print("Made by Yuki")
     print("i like dawgs!")
 end -- end of Final block
@@ -17276,7 +17678,19 @@ do -- // Changelog Popup UI
     -- Format: { version = "vX.X.X", date = "Date", changes = { {type = "fix/feature/update", text = "Description"}, ... } }
     local CHANGELOG_ENTRIES = {
                                                                 {
-            version = "v3.9",
+            version = "v4.1",
+            date = "January 2026",
+            changes = {
+                {type = "fix", text = "Fixed Minor Bypass Bugs"},
+                {type = "fix", text = "Improved Kill Aura"},
+                {type = "fix", text = "Optimized Script"},
+                {type = "fix", text = "Improved Animation Scanner (can Scan more animations now.)"},
+                {type = "fix", text = "Fixed Config Bug"},
+                {type = "fix", text = "Fixed Minor Bugs"},
+            }
+        },
+                                                                {
+            version = "v4",
             date = "January 2026",
             changes = {
                 {type = "feature", text = "Added Copy Animation ID"},
