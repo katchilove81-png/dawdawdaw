@@ -441,6 +441,86 @@ _G.ProtectedGUIs = ProtectedGUIs
 _G.ProtectedInstances = ProtectedInstances
 _G.CloakedInstances = CloakedInstances
 
+-- ===== ESP PROTECTION SYSTEM =====
+-- Automatically protects Highlights and BillboardGuis created by this script
+-- Call this function after creating any ESP visual to protect it from detection
+
+local ESPProtectedInstances = setmetatable({}, { __mode = "k" }) -- Weak keys for GC
+
+local function protectESP(instance)
+    if not instance then return end
+    if ESPProtectedInstances[instance] then return end -- Already protected
+    
+    pcall(function()
+        -- Add to protection tables (makes it invisible to GetChildren/GetDescendants scans)
+        ProtectedInstances[instance] = true
+        CloakedInstances[instance] = true
+        ESPProtectedInstances[instance] = true
+        
+        -- Also protect all descendants
+        for _, desc in ipairs(instance:GetDescendants()) do
+            ProtectedInstances[desc] = true
+            CloakedInstances[desc] = true
+            ESPProtectedInstances[desc] = true
+        end
+    end)
+end
+
+-- Scan and protect all ESP instances in a table
+local function protectESPData(espDataTable)
+    if not espDataTable then return end
+    for _, data in pairs(espDataTable) do
+        if data then
+            if data.highlight then protectESP(data.highlight) end
+            if data.billboard then protectESP(data.billboard) end
+            if data.dot then protectESP(data.dot) end
+        end
+    end
+end
+
+-- Periodic ESP protection scanner
+-- Scans for our ESP visuals and ensures they're protected
+local function startESPProtectionScanner()
+    task.defer(function()
+        task.wait(5) -- Initial delay
+        while true do
+            pcall(function()
+                -- Protect any ESPData entries
+                if ESPData then
+                    for espType, typeData in pairs(ESPData) do
+                        protectESPData(typeData)
+                    end
+                end
+                
+                -- Protect PlayerESPData
+                if PlayerESPData then
+                    for player, data in pairs(PlayerESPData) do
+                        if data then
+                            if data.Highlight then protectESP(data.Highlight) end
+                            if data.Billboard then protectESP(data.Billboard) end
+                        end
+                    end
+                end
+                
+                -- Protect active target visuals
+                if activeHighlight then protectESP(activeHighlight) end
+                if activeAimDot then protectESP(activeAimDot) end
+                if activeAimDotPart then protectESP(activeAimDotPart) end
+            end)
+            
+            task.wait(10) -- Scan every 10 seconds
+        end
+    end)
+end
+
+-- Start the ESP protection scanner
+startESPProtectionScanner()
+
+-- Expose protection functions
+_G.protectESP = protectESP
+_G.protectESPData = protectESPData
+_G.ESPProtectedInstances = ESPProtectedInstances
+
 -- ===== 2. KICK/BAN PREVENTION SYSTEM =====
 -- Blocks attempts to kick or ban the player
 
@@ -463,7 +543,7 @@ end)
 -- Intercepts all method calls on Roblox instances
 
 local blockedRemotes = {
-    -- Anti-cheat remote names
+    -- Anti-cheat remote names (very specific to avoid blocking game remotes)
     ["ReportPlayer"] = true,
     ["BanPlayer"] = true,
     ["KickPlayer"] = true,
@@ -472,40 +552,14 @@ local blockedRemotes = {
     ["SecurityViolation"] = true,
     ["AnticheatReport"] = true,
     ["FlagPlayer"] = true,
-    ["Violation"] = true,
-    ["Report"] = true,
-    ["Ban"] = true,
-    ["Kick"] = true,
-    -- Admin log remotes (bypass admin logs)
-    ["AdminLog"] = true,
-    ["LogAction"] = true,
-    ["AdminPanel"] = true,
-    ["ModeratorLog"] = true,
-    ["ServerLog"] = true,
-    ["ActionLog"] = true,
-    ["PlayerLog"] = true,
-    ["ReportLog"] = true,
-    ["BanLog"] = true,
-    ["KickLog"] = true,
-    ["AdminAction"] = true,
-    ["ModAction"] = true,
-    ["LogEvent"] = true,
-    ["EventLog"] = true,
-    ["SecurityLog"] = true,
-    ["CheatLog"] = true,
-    ["AntiCheat"] = true,
-    ["Detection"] = true,
-    ["Flag"] = true,
-    ["PlayerAction"] = true,
-    ["LogPlayer"] = true,
-    ["AdminCommand"] = true,
-    ["ModCommand"] = true,
+    -- Removed generic names: Violation, Report, Ban, Kick, AdminLog, etc.
+    -- These are too aggressive and block legitimate game functionality
 }
 
 -- Patterns to detect admin logging remotes (partial match)
+-- NOTE: Removed 'log', 'mod', 'ban', 'kick' - too aggressive, blocks game remotes
 local adminLogPatterns = {
-    "log", "admin", "report", "mod", "cheat", "detect", 
-    "anticheat", "security", "flag", "ban", "kick", "violation"
+    "anticheat", "cheatdetect", "exploitlog", "securityviolation"
 }
 
 local function isAdminLogRemote(remoteName)
@@ -523,15 +577,12 @@ local suspiciousArgs = {
     "exploit",
     "cheat",
     "hack",
-    "speed",
-    "teleport",
+    -- Removed: "speed" - blocks legitimate game tool remotes
+    -- Removed: "teleport" - could block game mechanics
     "noclip",
-    "fly",
     "aimbot",
-    "esp",
-    "infinite",
+    -- Removed: "esp" - our script uses this legitimately
     "godmode",
-    "script",
     "inject",
     "executor",
 }
@@ -1061,58 +1112,31 @@ pcall(function()
     local OriginalSize = HumanoidRootPart and HumanoidRootPart.Size or Vector3.new(2,2,1)
     
     -- Advanced hooks using AddSetHook/AddPropertyEmulator if available
+    -- NOTE: WalkSpeed NOT hooked - allows game to slow player during reload
+    -- NOTE: Health NOT hooked - allows healing from surgeon kit
     if ExecutorCapabilities.hasAddSetHook then
-        pcall(function() Humanoid:AddSetHook("WalkSpeed") end)
-        pcall(function() Humanoid:AddSetHook("JumpPower") end)
-        pcall(function() Humanoid:AddSetHook("JumpHeight") end)
-        pcall(function() Humanoid:AddSetHook("HipHeight") end)
+        -- Only hook properties that anti-cheat checks but game doesn't need to modify
         pcall(function() Humanoid:AddSetHook("MaxSlopeAngle") end)
-        pcall(function() workspace:AddSetHook("Gravity") end)
-        if HumanoidRootPart then
-            pcall(function() HumanoidRootPart:AddSetHook("CFrame") end)
-            pcall(function() HumanoidRootPart:AddSetHook("Velocity") end)
-            pcall(function() HumanoidRootPart:AddSetHook("AssemblyLinearVelocity") end)
-        end
+        -- Don't hook CFrame/Velocity - can break game physics
     end
     
+    -- Property emulators - only for properties that don't need to change for gameplay
+    -- NOTE: Health/WalkSpeed NOT emulated - need real values for gameplay mechanics
     if ExecutorCapabilities.hasAddPropertyEmulator then
-        pcall(function() Humanoid:AddPropertyEmulator("WalkSpeed") end)
-        pcall(function() Humanoid:AddPropertyEmulator("JumpPower") end)
-        pcall(function() Humanoid:AddPropertyEmulator("Health") end)
-        pcall(function() Humanoid:AddPropertyEmulator("MaxHealth") end)
         pcall(function() Humanoid:AddPropertyEmulator("HipHeight") end)
-        pcall(function() workspace:AddPropertyEmulator("Gravity") end)
-        if HumanoidRootPart then
-            pcall(function() HumanoidRootPart:AddPropertyEmulator("Velocity") end)
-            pcall(function() HumanoidRootPart:AddPropertyEmulator("Size") end)
-        end
     end
     
-    -- Global Get Hooks (spoof property reads)
+    -- Global Get Hooks - minimal set to avoid breaking game mechanics
+    -- NOTE: Most hooks removed - they were breaking reload slowdown and healing
     if ExecutorCapabilities.hasAddGetHook then
-        pcall(function() game:AddGlobalGetHook("WalkSpeed", OriginalWalkSpeed) end)
-        pcall(function() game:AddGlobalGetHook("JumpPower", OriginalJumpPower) end)
-        pcall(function() game:AddGlobalGetHook("Health", OriginalHealth) end)
-        pcall(function() game:AddGlobalGetHook("MaxHealth", OriginalMaxHealth) end)
         pcall(function() game:AddGlobalGetHook("HipHeight", OriginalHipHeight) end)
-        pcall(function() game:AddGlobalGetHook("Humanoid.Died", false) end)
-        pcall(function() game:AddGlobalGetHook("Gravity", OriginalGravity) end)
-        pcall(function() game:AddGlobalGetHook("Velocity", OriginalVelocity) end)
     end
     
-    -- Global Set Hooks (block property writes from anti-cheat)
+    -- Global Set Hooks - minimal set, removed WalkSpeed/Health/JumpPower to allow game mechanics
     pcall(function()
         if game.AddGlobalSetHook then
-            game:AddGlobalSetHook("WalkSpeed")
-            game:AddGlobalSetHook("JumpPower")
-            game:AddGlobalSetHook("JumpHeight")
-            game:AddGlobalSetHook("Health")
-            game:AddGlobalSetHook("MaxHealth")
             game:AddGlobalSetHook("HipHeight")
             game:AddGlobalSetHook("MaxSlopeAngle")
-            game:AddGlobalSetHook("Gravity")
-            game:AddGlobalSetHook("Velocity")
-            game:AddGlobalSetHook("AssemblyLinearVelocity")
         end
     end)
     
@@ -1136,12 +1160,7 @@ pcall(function()
             for _, conn in next, getconnections(game.ItemChanged) do
                 pcall(function() conn:Disable() end)
             end
-            -- Disable Humanoid.Changed connections
-            if Humanoid then
-                for _, conn in next, getconnections(Humanoid.Changed) do
-                    pcall(function() conn:Disable() end)
-                end
-            end
+            -- NOTE: NOT disabling Humanoid.Changed - it blocks healing from surgeon kit
             -- Disable LogService.MessageOut connections
             pcall(function()
                 for _, conn in next, getconnections(game:GetService("LogService").MessageOut) do
@@ -1175,28 +1194,17 @@ LocalPlayer.CharacterAdded:Connect(function(newChar)
         local HumanoidRootPart = newChar:WaitForChild("HumanoidRootPart", 5)
         if not Humanoid or not HumanoidRootPart then return end
         
-        local OriginalWalkSpeed = Humanoid.WalkSpeed
-        local OriginalJumpPower = Humanoid.JumpPower
-        
+        -- NOTE: Not hooking WalkSpeed/JumpPower - allows reload slowdown and game mechanics
         if ExecutorCapabilities.hasAddSetHook then
-            pcall(function() Humanoid:AddSetHook("WalkSpeed") end)
-            pcall(function() Humanoid:AddSetHook("JumpPower") end)
-            pcall(function() HumanoidRootPart:AddSetHook("CFrame") end)
-            pcall(function() HumanoidRootPart:AddSetHook("Velocity") end)
+            pcall(function() Humanoid:AddSetHook("MaxSlopeAngle") end)
         end
         
+        -- NOTE: Not emulating WalkSpeed/JumpPower - need real values
         if ExecutorCapabilities.hasAddPropertyEmulator then
-            pcall(function() Humanoid:AddPropertyEmulator("WalkSpeed") end)
-            pcall(function() Humanoid:AddPropertyEmulator("JumpPower") end)
-            pcall(function() HumanoidRootPart:AddPropertyEmulator("Velocity") end)
+            pcall(function() Humanoid:AddPropertyEmulator("HipHeight") end)
         end
         
-        -- Disable Humanoid.Changed for new character
-        if getconnections then
-            for _, conn in next, getconnections(Humanoid.Changed) do
-                pcall(function() conn:Disable() end)
-            end
-        end
+        -- NOTE: NOT disabling Humanoid.Changed - it blocks healing from surgeon kit
         
         -- Block BreakJoints
         if newChar.AddCallHook then
@@ -1205,465 +1213,9 @@ LocalPlayer.CharacterAdded:Connect(function(newChar)
     end)
 end)
 
--- ===== 13. FULL BYPASS CLEAN INTEGRATION (Raw from bypass clean.lua) =====
--- Complete obfuscated anti-cheat bypass with metatable hooks
-pcall(function()
-    -- String decoding functions
-    local function n23(str, key)
-        local result = {}
-        local keyStr = tostring(key)
-        local keyLen = #keyStr
-        local keyIndex = 1
-        for i = 1, #str, 2 do
-            local byte = tonumber(str:sub(i, i + 1), 16)
-            if byte then
-                local keyByte = string.byte(keyStr, keyIndex)
-                table.insert(result, string.char(bit32.bxor(byte, keyByte)))
-                keyIndex = (keyIndex % keyLen) + 1
-            end
-        end
-        return table.concat(result)
-    end
-    
-    local function n21(str, key)
-        local result = {}
-        local keyStr = tostring(key)
-        local keyLen = #keyStr
-        local keyIndex = 1
-        for i = 1, #str, 2 do
-            local byte = tonumber(str:sub(i, i + 1), 16)
-            if byte then
-                local keyByte = string.byte(keyStr, keyIndex)
-                table.insert(result, string.char(bit32.bxor(byte, keyByte)))
-                keyIndex = (keyIndex % keyLen) + 1
-            end
-        end
-        return table.concat(result)
-    end
-    
-    -- Executor detection
-    local CurrentExecID = 0
-    local function GetExecutorID()
-        if Protosmasher then return 1
-        elseif Elysian then return 2
-        elseif is_synapse_function then return 3
-        elseif pebc_execute then return 4
-        elseif syn then return 5
-        elseif KRNL_LOADED then return 6
-        end
-        return 0
-    end
-    CurrentExecID = GetExecutorID()
-    
-    -- Get caller function helper
-    local function GetCallerFunc()
-        local info = debug.info(3, "f")
-        return info
-    end
-    
-    -- Hook storage tables
-    local IndexHooks = {}
-    local NewIndexHooks = {}
-    local NamecallHooks = {}
-    local GlobalIndexHooks = {}
-    local GlobalNewIndexHooks = {}
-    local GlobalNamecallHooks = {}
-    local PropertyTypeMap = {}
-    local PropertyValueMap = {}
-    
-    -- Feature flags
-    local Events = true -- Allow remote events
-    local Requests = true -- Allow remote functions
-    local Hitbox = true -- Don't run hitbox loop (we have our own)
-    
-    -- Initialize metatable hooks
-    local function InitializeHooks()
-        local game = game
-        local RawMetatable = getrawmetatable(game)
-        if not RawMetatable then return end
-        
-        local OriginalIndex = RawMetatable.__index
-        local OriginalNewIndex = RawMetatable.__newindex
-        local OriginalNamecall = RawMetatable.__namecall
-        
-        -- Make metatable writable
-        if CurrentExecID == 0 then
-            if make_writeable then make_writeable(RawMetatable) end
-        elseif CurrentExecID == 2 then
-            -- Elysian doesn't need this
-        else
-            if setreadonly then setreadonly(RawMetatable, false) end
-        end
-        
-        -- Hook __index
-        RawMetatable.__index = newcclosure(function(self, index)
-            local caller = GetCallerFunc()
-            
-            -- Check instance-specific hooks
-            if IndexHooks[self] and IndexHooks[self][index] then
-                local hookData = IndexHooks[self][index]
-                if hookData.Callback then
-                    return hookData.Callback(OriginalIndex(self, index))
-                end
-                return hookData.Value
-            end
-            
-            -- Check global index hooks
-            if GlobalIndexHooks[index] then
-                local hookData = GlobalIndexHooks[index]
-                if hookData.Callback then
-                    return hookData.Callback(self, OriginalIndex(self, index))
-                end
-                return hookData.Value
-            end
-            
-            -- Check property value spoofing
-            if PropertyValueMap[self] and PropertyValueMap[self][index] then
-                return PropertyValueMap[self][index]
-            end
-            
-            return OriginalIndex(self, index)
-        end)
-        
-        -- Hook __newindex
-        RawMetatable.__newindex = newcclosure(function(self, index, value)
-            local caller = GetCallerFunc()
-            
-            -- Check instance-specific hooks (block writes)
-            if NewIndexHooks[self] and NewIndexHooks[self][index] then
-                return -- Block the write
-            end
-            
-            -- Check global newindex hooks (block writes)
-            if GlobalNewIndexHooks[index] then
-                return -- Block the write
-            end
-            
-            return OriginalNewIndex(self, index, value)
-        end)
-        
-        -- Hook __namecall
-        RawMetatable.__namecall = newcclosure(function(self, ...)
-            local CallMethod = getnamecallmethod()
-            local CallArgs = {...}
-            local CallInstance = self
-            
-            -- AddGetHook method
-            if CallMethod == "AddGetHook" or CallMethod == "AddGlobalGetHook" then
-                if #CallArgs < 1 then return end
-                local propName = CallArgs[1]
-                local value = CallArgs[2]
-                if type(propName) ~= "string" then return end
-                
-                if CallMethod == "AddGlobalGetHook" then
-                    GlobalIndexHooks[propName] = { Value = value }
-                else
-                    if not IndexHooks[CallInstance] then IndexHooks[CallInstance] = {} end
-                    IndexHooks[CallInstance][propName] = { Value = value }
-                end
-                
-                local removeFunc = function()
-                    if CallMethod == "AddGlobalGetHook" then
-                        GlobalIndexHooks[propName] = nil
-                    else
-                        if IndexHooks[CallInstance] then
-                            IndexHooks[CallInstance][propName] = nil
-                        end
-                    end
-                end
-                return { remove = removeFunc, Remove = removeFunc }
-            end
-            
-            -- AddSetHook method
-            if CallMethod == "AddSetHook" or CallMethod == "AddGlobalSetHook" then
-                if #CallArgs < 1 then return end
-                local propName = CallArgs[1]
-                if type(propName) ~= "string" then return end
-                
-                if CallMethod == "AddGlobalSetHook" then
-                    GlobalNewIndexHooks[propName] = { Block = true }
-                else
-                    if not NewIndexHooks[CallInstance] then NewIndexHooks[CallInstance] = {} end
-                    NewIndexHooks[CallInstance][propName] = { Block = true }
-                end
-                
-                local removeFunc = function()
-                    if CallMethod == "AddGlobalSetHook" then
-                        GlobalNewIndexHooks[propName] = nil
-                    else
-                        if NewIndexHooks[CallInstance] then
-                            NewIndexHooks[CallInstance][propName] = nil
-                        end
-                    end
-                end
-                return { remove = removeFunc, Remove = removeFunc }
-            end
-            
-            -- AddCallHook method
-            if CallMethod == "AddCallHook" then
-                if #CallArgs < 2 then return end
-                local methodName = CallArgs[1]
-                local callback = CallArgs[2]
-                if type(methodName) ~= "string" then return end
-                if type(callback) ~= "function" then return end
-                
-                if not NamecallHooks[CallInstance] then NamecallHooks[CallInstance] = {} end
-                NamecallHooks[CallInstance][methodName] = { Callback = callback }
-                
-                local removeFunc = function()
-                    if NamecallHooks[CallInstance] then
-                        NamecallHooks[CallInstance][methodName] = nil
-                    end
-                end
-                return { remove = removeFunc, Remove = removeFunc }
-            end
-            
-            -- AddGlobalCallHook method
-            if CallMethod == "AddGlobalCallHook" then
-                if #CallArgs < 2 then return end
-                local methodName = CallArgs[1]
-                local callback = CallArgs[2]
-                if type(methodName) ~= "string" then return end
-                if type(callback) ~= "function" then return end
-                
-                GlobalNamecallHooks[methodName] = { Callback = callback }
-                
-                local removeFunc = function()
-                    GlobalNamecallHooks[methodName] = nil
-                end
-                return { remove = removeFunc, Remove = removeFunc }
-            end
-            
-            -- AddPropertyEmulator method
-            if CallMethod == "AddPropertyEmulator" then
-                if #CallArgs < 1 then return end
-                local propName = CallArgs[1]
-                if type(propName) ~= "string" then return end
-                
-                local currentValue = OriginalIndex(CallInstance, propName)
-                local valueType = type(currentValue)
-                
-                if not PropertyTypeMap[CallInstance] then PropertyTypeMap[CallInstance] = {} end
-                if not PropertyValueMap[CallInstance] then PropertyValueMap[CallInstance] = {} end
-                
-                PropertyTypeMap[CallInstance][propName] = { Type = valueType }
-                PropertyValueMap[CallInstance][propName] = currentValue
-                
-                local removeFunc = function()
-                    if PropertyTypeMap[CallInstance] then PropertyTypeMap[CallInstance][propName] = nil end
-                    if PropertyValueMap[CallInstance] then PropertyValueMap[CallInstance][propName] = nil end
-                end
-                return { remove = removeFunc, Remove = removeFunc }
-            end
-            
-            -- Check instance-specific call hooks
-            if NamecallHooks[CallInstance] and NamecallHooks[CallInstance][CallMethod] then
-                local hookData = NamecallHooks[CallInstance][CallMethod]
-                return hookData.Callback(OriginalIndex(CallInstance, CallMethod), unpack(CallArgs))
-            end
-            
-            -- Check global call hooks
-            if GlobalNamecallHooks[CallMethod] then
-                local hookData = GlobalNamecallHooks[CallMethod]
-                return hookData.Callback(CallInstance, OriginalIndex(CallInstance, CallMethod), unpack(CallArgs))
-            end
-            
-            return OriginalNamecall(CallInstance, ...)
-        end)
-        
-        -- Restore metatable read-only state
-        if CurrentExecID == 0 then
-            if make_readonly then make_readonly(RawMetatable) end
-        elseif CurrentExecID == 2 then
-            -- Elysian doesn't need this
-        else
-            if setreadonly then setreadonly(RawMetatable, true) end
-        end
-    end
-    
-    -- Initialize the hooks
-    InitializeHooks()
-end)
-
--- Apply bypass hooks to current character
-pcall(function()
-    local Character = LocalPlayer.Character
-    if not Character then return end
-    local Humanoid = Character:FindFirstChildOfClass("Humanoid")
-    if not Humanoid then return end
-    local HumanoidRootPart = Character:FindFirstChild("HumanoidRootPart")
-    
-    -- Store original values
-    local OriginalWalkSpeed = Humanoid.WalkSpeed
-    local OriginalJumpPower = Humanoid.JumpPower
-    local OriginalHealth = Humanoid.Health
-    local OriginalMaxHealth = Humanoid.MaxHealth
-    local OriginalHipHeight = Humanoid.HipHeight
-    local OriginalGravity = workspace.Gravity
-    local OriginalVelocity = HumanoidRootPart and HumanoidRootPart.Velocity or Vector3.new(0,0,0)
-    local OriginalSize = HumanoidRootPart and HumanoidRootPart.Size or Vector3.new(2,2,1)
-    
-    -- Humanoid set hooks (block anti-cheat writes)
-    pcall(function() Humanoid:AddSetHook("WalkSpeed") end)
-    pcall(function() Humanoid:AddSetHook("JumpPower") end)
-    pcall(function() Humanoid:AddSetHook("JumpHeight") end)
-    pcall(function() Humanoid:AddSetHook("HipHeight") end)
-    pcall(function() Humanoid:AddSetHook("MaxSlopeAngle") end)
-    
-    -- Workspace set hooks
-    pcall(function() workspace:AddSetHook("Gravity") end)
-    
-    -- HumanoidRootPart set hooks
-    if HumanoidRootPart then
-        pcall(function() HumanoidRootPart:AddSetHook("CFrame") end)
-        pcall(function() HumanoidRootPart:AddSetHook("Velocity") end)
-        pcall(function() HumanoidRootPart:AddSetHook("AssemblyLinearVelocity") end)
-    end
-    
-    -- Humanoid property emulators (spoof reads)
-    pcall(function() Humanoid:AddPropertyEmulator("WalkSpeed") end)
-    pcall(function() Humanoid:AddPropertyEmulator("JumpPower") end)
-    pcall(function() Humanoid:AddPropertyEmulator("Health") end)
-    pcall(function() Humanoid:AddPropertyEmulator("MaxHealth") end)
-    pcall(function() Humanoid:AddPropertyEmulator("HipHeight") end)
-    
-    -- Workspace property emulators
-    pcall(function() workspace:AddPropertyEmulator("Gravity") end)
-    
-    -- HumanoidRootPart property emulators
-    if HumanoidRootPart then
-        pcall(function() HumanoidRootPart:AddPropertyEmulator("Velocity") end)
-        pcall(function() HumanoidRootPart:AddPropertyEmulator("Size") end)
-    end
-    
-    -- Global get hooks (spoof property reads game-wide)
-    pcall(function() game:AddGlobalGetHook("WalkSpeed", OriginalWalkSpeed) end)
-    pcall(function() game:AddGlobalGetHook("JumpPower", OriginalJumpPower) end)
-    pcall(function() game:AddGlobalGetHook("Health", OriginalHealth) end)
-    pcall(function() game:AddGlobalGetHook("MaxHealth", OriginalMaxHealth) end)
-    pcall(function() game:AddGlobalGetHook("HipHeight", OriginalHipHeight) end)
-    pcall(function() game:AddGlobalGetHook("Humanoid.Died", false) end)
-    pcall(function() game:AddGlobalGetHook("Gravity", OriginalGravity) end)
-    pcall(function() game:AddGlobalGetHook("Velocity", OriginalVelocity) end)
-    
-    -- Global set hooks (block anti-cheat writes game-wide)
-    pcall(function() game:AddGlobalSetHook("WalkSpeed") end)
-    pcall(function() game:AddGlobalSetHook("JumpPower") end)
-    pcall(function() game:AddGlobalSetHook("JumpHeight") end)
-    pcall(function() game:AddGlobalSetHook("Health") end)
-    pcall(function() game:AddGlobalSetHook("MaxHealth") end)
-    pcall(function() game:AddGlobalSetHook("HipHeight") end)
-    pcall(function() game:AddGlobalSetHook("MaxSlopeAngle") end)
-    pcall(function() game:AddGlobalSetHook("Gravity") end)
-    pcall(function() game:AddGlobalSetHook("Velocity") end)
-    pcall(function() game:AddGlobalSetHook("AssemblyLinearVelocity") end)
-    
-    -- Block dangerous calls
-    pcall(function() Character:AddCallHook("BreakJoints", function() return end) end)
-    pcall(function() LocalPlayer:AddCallHook("Kick", function() return task.wait(9e9) end) end)
-    
-    -- Block Kick on all players
-    pcall(function()
-        for _, player in pairs(game:GetService("Players"):GetChildren()) do
-            pcall(function()
-                player:AddCallHook("Kick", function() return task.wait(9e9) end)
-            end)
-        end
-    end)
-    
-    -- Global Kick hook
-    pcall(function() game:AddGlobalCallHook("Kick", function() end) end)
-    
-    -- Hook Kick function directly
-    pcall(function()
-        if hookfunc or hookfunction then
-            local hook = hookfunc or hookfunction
-            hook(LocalPlayer.Kick, function() end)
-        end
-    end)
-    
-    -- Disable anti-cheat event connections
-    pcall(function()
-        if getconnections then
-            -- ItemChanged
-            for _, conn in next, getconnections(game.ItemChanged) do
-                pcall(function() conn:Disable() end)
-            end
-            
-            -- Humanoid.Changed
-            for _, conn in next, getconnections(Humanoid.Changed) do
-                pcall(function() conn:Disable() end)
-            end
-            
-            -- LogService.MessageOut
-            for _, conn in next, getconnections(game:GetService("LogService").MessageOut) do
-                pcall(function() conn:Disable() end)
-            end
-            
-            -- ScriptContext.Error
-            for _, conn in next, getconnections(game:GetService("ScriptContext").Error) do
-                pcall(function() conn:Disable() end)
-            end
-        end
-    end)
-    
-    -- Set HttpService timeout
-    pcall(function()
-        game:GetService("HttpService"):SetTimeout(0.05)
-    end)
-    
-    if ANTIBAN_DEBUG then
-        warn("[ANTI-BAN] Full bypass clean integration initialized")
-    end
-end)
-
--- Re-apply full bypass on respawn
-LocalPlayer.CharacterAdded:Connect(function(newChar)
-    task.delay(0.5, function()
-        pcall(function()
-            local Humanoid = newChar:WaitForChild("Humanoid", 5)
-            local HumanoidRootPart = newChar:WaitForChild("HumanoidRootPart", 5)
-            if not Humanoid or not HumanoidRootPart then return end
-            
-            -- Store original values
-            local OriginalWalkSpeed = Humanoid.WalkSpeed
-            local OriginalJumpPower = Humanoid.JumpPower
-            local OriginalVelocity = HumanoidRootPart.Velocity
-            local OriginalSize = HumanoidRootPart.Size
-            
-            -- Apply set hooks
-            pcall(function() Humanoid:AddSetHook("WalkSpeed") end)
-            pcall(function() Humanoid:AddSetHook("JumpPower") end)
-            pcall(function() Humanoid:AddSetHook("JumpHeight") end)
-            pcall(function() Humanoid:AddSetHook("HipHeight") end)
-            pcall(function() HumanoidRootPart:AddSetHook("CFrame") end)
-            pcall(function() HumanoidRootPart:AddSetHook("Velocity") end)
-            pcall(function() HumanoidRootPart:AddSetHook("AssemblyLinearVelocity") end)
-            
-            -- Apply property emulators
-            pcall(function() Humanoid:AddPropertyEmulator("WalkSpeed") end)
-            pcall(function() Humanoid:AddPropertyEmulator("JumpPower") end)
-            pcall(function() Humanoid:AddPropertyEmulator("Health") end)
-            pcall(function() HumanoidRootPart:AddPropertyEmulator("Velocity") end)
-            pcall(function() HumanoidRootPart:AddPropertyEmulator("Size") end)
-            
-            -- Block dangerous calls
-            pcall(function() newChar:AddCallHook("BreakJoints", function() return end) end)
-            
-            -- Disable Humanoid.Changed for new character
-            if getconnections then
-                for _, conn in next, getconnections(Humanoid.Changed) do
-                    pcall(function() conn:Disable() end)
-                end
-            end
-            
-            if ANTIBAN_DEBUG then
-                warn("[ANTI-BAN] Full bypass clean re-applied on respawn")
-            end
-        end)
-    end)
-end)
--- ===== END FULL BYPASS CLEAN INTEGRATION =====
+-- Section 13 REMOVED: Full bypass clean integration was causing FPS drops and breaking game mechanics
+-- The metatable hooks intercept every single property access causing massive overhead
+-- Sections 1-12 already provide sufficient protection without the performance cost
 
 end
 -- ===== END ADVANCED BYPASS ANTI-CHEAT =====
@@ -2141,7 +1693,7 @@ local Window = WindUI:CreateWindow({
 
     Window:SetIconSize(48)
     Window:Tag({
-        Title = "v4.1",
+        Title = "v4.2",
         Color = Color3.fromHex("#d9ff00") -- deep crimson
     })
     Window:Tag({
@@ -2173,13 +1725,13 @@ local Window = WindUI:CreateWindow({
     })
 
     InfoSection:Paragraph({
-        Title = "Katchi Hub v4.1",
+        Title = "Katchi Hub v4.2",
         Desc = "Professional Guts & BlackPowder Script Hub\nMade by Yuki\nExecutor: "..(identifyexecutor and identifyexecutor() or "Unknown"),
     })
 
     InfoSection:Paragraph({
         Title = "Changelogs",
-        Desc = "Fixes\n- Fixed Minor Bypass Bugs\n- Improved Kill Aura\n- Improved Animation Scanner (can Scan more animations now.)\n- Fixed Config Bug\n- Fixed Minor Bugs",
+        Desc = "Fixes\n- Fixed Minor Bugs\n- Reduced Lag From Bypass\n- Improved Bypass for Other Features\n- Fixed Fullbright And No Fog bug and issues",
     })
 
 -- Make sure this exists somewhere near the top of your script
@@ -3696,6 +3248,14 @@ local function createAimDot()
     activeAimDot = billboard
     activeAimDotCurrentPos = startPos
     
+    -- PROTECT aim dot visuals from anti-cheat detection
+    pcall(function()
+        if _G.protectESP then
+            _G.protectESP(anchorPart)
+            _G.protectESP(billboard)
+        end
+    end)
+    
     return billboard
 end
 
@@ -3834,6 +3394,12 @@ local function createTargetHighlight(model)
     hl.FillTransparency = math.clamp(TARGET_CHAMS_TRANSPARENCY, 0, 1)
     hl.OutlineTransparency = 0
     activeHighlight = hl
+    
+    -- PROTECT target highlight from anti-cheat detection
+    pcall(function()
+        if _G.protectESP then _G.protectESP(hl) end
+    end)
+    
     return hl
 end
 local function updateActiveTargetVisuals(model, part)
@@ -7824,6 +7390,15 @@ local function CreateVisual(espType, zombie)
         distLbl.Parent = frame
         data.distLabel = distLbl
     end
+    
+    -- PROTECT ESP VISUALS from anti-cheat detection
+    pcall(function()
+        if _G.protectESP then
+            if data.highlight then _G.protectESP(data.highlight) end
+            if data.billboard then _G.protectESP(data.billboard) end
+            if data.dot then _G.protectESP(data.dot) end
+        end
+    end)
 end
 
     local function RemoveVisual(espType, zombie)
@@ -9100,7 +8675,8 @@ local function KillAura_performKillAura(hrp)
     end
 
     -- Auto-look using BodyGyro (doesn't affect movement at all)
-    if KillAuraAutoLook and firstTarget and firstTarget.head and firstTarget.head.Parent then
+    -- Skip if flying - the fly loop handles Auto Look integration
+    if KillAuraAutoLook and firstTarget and firstTarget.head and firstTarget.head.Parent and not FlyEnabled then
         pcall(function()
             local targetPos = firstTarget.head.Position
             -- Calculate look direction (Y-axis only - horizontal rotation)
@@ -9123,8 +8699,8 @@ local function KillAura_performKillAura(hrp)
                 autoLookGyro.CFrame = CFrame.lookAt(hrpPos, hrpPos + direction.Unit)
             end
         end)
-    else
-        -- Clean up BodyGyro when auto-look is disabled or no target
+    elseif not FlyEnabled then
+        -- Clean up BodyGyro when auto-look is disabled or no target (only if not flying)
         pcall(function()
             local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
             if autoLookGyro then
@@ -12019,6 +11595,14 @@ do -- // Players Tab
             CurrentStudsOffset = HEALTH_BILLBOARD_OFFSET,
             DesiredStudsOffset = HEALTH_BILLBOARD_OFFSET
         }
+        
+        -- PROTECT Player ESP visuals from anti-cheat detection
+        pcall(function()
+            if _G.protectESP then
+                if highlight then _G.protectESP(highlight) end
+                if billboard then _G.protectESP(billboard) end
+            end
+        end)
 
         -- ensure initial visibility respects settings
         if PlayerESPData[player].HealthOuter then
@@ -15377,290 +14961,77 @@ local AutoRemoveHorsesToggle = VisualSection:Toggle({
 _G.KatchiToggleElements = _G.KatchiToggleElements or {}
 _G.KatchiToggleElements.AutoRemoveHorses = AutoRemoveHorsesToggle
 
--- === Optimized Visuals: Fullbright (event-driven) & NoFog (event-driven) ===
-local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
+-- === Simplified Visuals: Fullbright & NoFog ===
 local Lighting = game:GetService("Lighting")
 
 local fullbrightEnabled = false
 local noFogEnabled = false
-
--- Keep track of connections so we can disconnect cleanly
-local conns = {
-    lightingPropertyChanged = nil,
-    lightingChildAdded = nil,
-    workspaceDescendantAdded = nil,
-}
 
 -- Save originals for restoration
 local originalLighting = {
     Brightness = Lighting.Brightness,
     ClockTime = Lighting.ClockTime,
     FogEnd = Lighting.FogEnd,
-    FogStart = Lighting.FogStart,
     GlobalShadows = Lighting.GlobalShadows,
     OutdoorAmbient = Lighting.OutdoorAmbient,
-    Ambient = Lighting.Ambient
 }
 
--- Track modified instances and their original states so we can restore later
--- Use weak keys so destroyed instances get garbage collected
-local modifiedEffects = setmetatable({}, { __mode = "k" })    -- { [instance] = {ClassName="BloomEffect", OriginalEnabled=true} }
-local modifiedAtmospheres = setmetatable({}, { __mode = "k" }) -- { [instance] = {Density = X, Haze = Y, Offset = Z} }
-
--- Utility safe setter
-local function safeSet(obj, prop, val)
-    pcall(function() obj[prop] = val end)
-end
-
--- Disable known lighting post-process effects and record originals
-local function disableLightingEffectsOnce()
-    for _, inst in ipairs(Lighting:GetDescendants()) do
-        if inst:IsA("ColorCorrection") or inst:IsA("BloomEffect")
-            or inst:IsA("SunRaysEffect") or inst:IsA("BlurEffect") then
-            if not modifiedEffects[inst] then
-                modifiedEffects[inst] = { OriginalEnabled = inst.Enabled }
-                pcall(function() inst.Enabled = false end)
-            end
-        end
-    end
-end
-
-local function restoreLightingEffects()
-    for inst, info in pairs(modifiedEffects) do
-        if inst and inst.Parent then
-            pcall(function() inst.Enabled = info.OriginalEnabled end)
-        end
-    end
-    modifiedEffects = setmetatable({}, { __mode = "k" })
-end
-
--- Disable atmospheres (record originals) in workspace
-local function disableAtmospheresOnce()
-    for _, inst in ipairs(Workspace:GetDescendants()) do
-        if inst:IsA("Atmosphere") then
-            if not modifiedAtmospheres[inst] then
-                modifiedAtmospheres[inst] = {
-                    Density = inst.Density,
-                    Haze = inst.Haze,
-                    Offset = inst.Offset
-                }
-                pcall(function()
-                    inst.Density = 0
-                    inst.Haze = 0
-                    inst.Offset = 0
-                end)
-            end
-        end
-    end
-end
-
-local function restoreAtmospheres()
-    for inst, info in pairs(modifiedAtmospheres) do
-        if inst and inst.Parent then
-            pcall(function()
-                inst.Density = info.Density
-                inst.Haze = info.Haze
-                inst.Offset = info.Offset
-            end)
-        end
-    end
-    modifiedAtmospheres = setmetatable({}, { __mode = "k" })
-end
-
--- Reapply lighting values (used by property-change handler)
-local function applyFullbrightLighting()
+-- Simple Fullbright - just set values once
+local function applyFullbright()
     pcall(function()
         Lighting.Brightness = 2
         Lighting.ClockTime = 14
-        Lighting.FogEnd = 1e6
-        if Lighting.FogStart ~= nil then Lighting.FogStart = 0 end
-        Lighting.GlobalShadows = false
-        Lighting.OutdoorAmbient = Color3.fromRGB(128,128,128)
-        Lighting.Ambient = Color3.fromRGB(128,128,128)
-    end)
-end
-
--- Reapply fog removal
-local function applyNoFog()
-    pcall(function()
         Lighting.FogEnd = 100000
-        if Lighting.FogStart ~= nil then Lighting.FogStart = 0 end
+        Lighting.GlobalShadows = false
+        Lighting.OutdoorAmbient = Color3.fromRGB(128, 128, 128)
     end)
 end
 
--- Start Fullbright: set once, disable effects/atmospheres and attach listeners
-local function startFullbright()
-    -- set desired lighting now
-    applyFullbrightLighting()
-
-    -- disable existing effects/atmospheres
-    disableLightingEffectsOnce()
-    disableAtmospheresOnce()
-
-    -- listen for future Lighting children (post-processes) and disable them when added
-    if not conns.lightingChildAdded then
-        conns.lightingChildAdded = Lighting.ChildAdded:Connect(function(child)
-            if child:IsA("ColorCorrection") or child:IsA("BloomEffect")
-                or child:IsA("SunRaysEffect") or child:IsA("BlurEffect") then
-                if not modifiedEffects[child] then
-                    modifiedEffects[child] = { OriginalEnabled = child.Enabled }
-                    pcall(function() child.Enabled = false end)
-                end
-            end
-        end)
-    end
-
-    -- listen for Atmosphere added to workspace
-    if not conns.workspaceDescendantAdded then
-        conns.workspaceDescendantAdded = Workspace.DescendantAdded:Connect(function(desc)
-            if desc:IsA("Atmosphere") then
-                if not modifiedAtmospheres[desc] then
-                    modifiedAtmospheres[desc] = {
-                        Density = desc.Density,
-                        Haze = desc.Haze,
-                        Offset = desc.Offset
-                    }
-                    pcall(function()
-                        desc.Density = 0
-                        desc.Haze = 0
-                        desc.Offset = 0
-                    end)
-                end
-            end
-        end)
-    end
-
-    -- If something (game scripts) changes Lighting properties, reapply ours
-    if not conns.lightingPropertyChanged then
-        conns.lightingPropertyChanged = {}
-        local props = {"Brightness","ClockTime","FogEnd","FogStart","GlobalShadows","OutdoorAmbient","Ambient"}
-        for _, prop in ipairs(props) do
-            local ok, conn = pcall(function()
-                return Lighting:GetPropertyChangedSignal(prop):Connect(function()
-                    -- only reapply the values that Fullbright owns
-                    applyFullbrightLighting()
-                end)
-            end)
-            if ok and conn then
-                table.insert(conns.lightingPropertyChanged, conn)
-            end
-        end
-    end
-end
-
-local function stopFullbright()
-    -- disconnect listeners
-    if conns.lightingChildAdded then conns.lightingChildAdded:Disconnect(); conns.lightingChildAdded = nil end
-    if conns.workspaceDescendantAdded then conns.workspaceDescendantAdded:Disconnect(); conns.workspaceDescendantAdded = nil end
-    if conns.lightingPropertyChanged then
-        for _, c in ipairs(conns.lightingPropertyChanged) do
-            if c and c.Disconnect then pcall(function() c:Disconnect() end) end
-        end
-        conns.lightingPropertyChanged = nil
-    end
-
-    -- restore lighting values (but if NoFog still enabled, keep Fog settings removed)
+local function restoreFullbright()
     pcall(function()
         Lighting.Brightness = originalLighting.Brightness
         Lighting.ClockTime = originalLighting.ClockTime
-        -- Fog restored below depending on noFogEnabled
+        if not noFogEnabled then
+            Lighting.FogEnd = originalLighting.FogEnd
+        end
         Lighting.GlobalShadows = originalLighting.GlobalShadows
         Lighting.OutdoorAmbient = originalLighting.OutdoorAmbient
-        Lighting.Ambient = originalLighting.Ambient
     end)
-
-    -- restore effects & atmospheres that we changed (NoFog may also have modified FogEnd/Start; handled below)
-    restoreLightingEffects()
-    restoreAtmospheres()
 end
 
--- Start NoFog: similar but only affects Fog and Atmosphere
-local function startNoFog()
-    applyNoFog()
-    disableAtmospheresOnce()
-
-    -- reuse workspace descendant listener to catch future Atmospheres (if not already connected)
-    if not conns.workspaceDescendantAdded then
-        conns.workspaceDescendantAdded = Workspace.DescendantAdded:Connect(function(desc)
-            if desc:IsA("Atmosphere") then
-                if not modifiedAtmospheres[desc] then
-                    modifiedAtmospheres[desc] = {
-                        Density = desc.Density,
-                        Haze = desc.Haze,
-                        Offset = desc.Offset
-                    }
-                    pcall(function()
-                        desc.Density = 0
-                        desc.Haze = 0
-                        desc.Offset = 0
-                    end)
-                end
-            end
-        end)
-    end
-
-    -- keep Fog values stable if something tries to change them
-    if not conns.lightingPropertyChanged then
-        conns.lightingPropertyChanged = {}
-    end
-    if not conns._fogWatcher then
-        conns._fogWatcher = Lighting:GetPropertyChangedSignal("FogEnd"):Connect(function()
-            applyNoFog()
-        end)
-        table.insert(conns.lightingPropertyChanged, conns._fogWatcher)
-    end
-    if not conns._fogStartWatcher then
-        conns._fogStartWatcher = Lighting:GetPropertyChangedSignal("FogStart"):Connect(function()
-            applyNoFog()
-        end)
-        table.insert(conns.lightingPropertyChanged, conns._fogStartWatcher)
-    end
-end
-
-local function stopNoFog()
-    -- If fullbright is enabled we should not restore fog (fullbright owns fog state)
-    if fullbrightEnabled then
-        -- No action: fullbright will continue enforcing fog removal
-        return
-    end
-
-    -- Disconnect fog watchers if any (but we leave workspaceDescendantAdded only if fullbright isn't running)
-    if conns._fogWatcher then conns._fogWatcher:Disconnect(); conns._fogWatcher = nil end
-    if conns._fogStartWatcher then conns._fogStartWatcher:Disconnect(); conns._fogStartWatcher = nil end
-
-    -- restore Fog values
+-- Simple NoFog - just set FogEnd and destroy Atmospheres
+local function applyNoFog()
     pcall(function()
-        Lighting.FogEnd = originalLighting.FogEnd
-        if Lighting.FogStart ~= nil then
-            Lighting.FogStart = originalLighting.FogStart
+        Lighting.FogEnd = 100000
+        for _, v in pairs(Lighting:GetDescendants()) do
+            if v:IsA("Atmosphere") then
+                v:Destroy()
+            end
         end
     end)
+end
 
-    -- restore atmospheres we changed (unless fullbright is enabled)
+local function restoreNoFog()
     if not fullbrightEnabled then
-        restoreAtmospheres()
-        -- if no more features using workspaceDescendantAdded, disconnect it
-        if conns.workspaceDescendantAdded then
-            conns.workspaceDescendantAdded:Disconnect()
-            conns.workspaceDescendantAdded = nil
-        end
+        pcall(function()
+            Lighting.FogEnd = originalLighting.FogEnd
+        end)
     end
 end
 
--- UI toggles (replace your existing Callback bodies with these)
+-- UI toggles
 VisualSection:Toggle({
     Title = "Fullbright",
     Flag = "Visual_1",
-    Desc = "Loop fullbright (optimized)",
+    Desc = "Enable fullbright lighting",
     Default = false,
     Callback = function(state)
         fullbrightEnabled = state
         if state then
-            startFullbright()
+            applyFullbright()
             WindUI:Notify({ Title = "Visual", Content = "Fullbright enabled.", Duration = 2, Icon = "sun" })
         else
-            stopFullbright()
+            restoreFullbright()
             WindUI:Notify({ Title = "Visual", Content = "Fullbright disabled.", Duration = 2, Icon = "moon" })
         end
     end
@@ -15669,15 +15040,15 @@ VisualSection:Toggle({
 VisualSection:Toggle({
     Title = "No Fog",
     Flag = "Visual_2",
-    Desc = "Turn On No Fog (optimized)",
+    Desc = "Remove fog and atmospheres",
     Default = false,
     Callback = function(state)
         noFogEnabled = state
         if state then
-            startNoFog()
+            applyNoFog()
             WindUI:Notify({ Title = "Visual", Content = "NoFog enabled.", Duration = 2, Icon = "cloud-off" })
         else
-            stopNoFog()
+            restoreNoFog()
             WindUI:Notify({ Title = "Visual", Content = "NoFog disabled.", Duration = 2, Icon = "cloud" })
         end
     end
@@ -15813,7 +15184,7 @@ VisualSection:Toggle({
     FlyEnabled = false -- Global for keybind access
     FlySpeed = 40 -- Default fly speed
     local flyBodyVelocity = nil
-    local flyBodyGyro = nil
+    FlyBodyGyro = nil -- Global so Auto Look can detect flying
     local flyConnection = nil
     local flyAnimConnection = nil -- Connection to stop climb animations
     local flyStateConnection = nil -- Connection to enforce climbing state
@@ -15942,13 +15313,13 @@ VisualSection:Toggle({
         flyBodyVelocity.Parent = hrp
         
         -- Create BodyGyro for full 3D rotation following camera
-        flyBodyGyro = Instance.new("BodyGyro")
+        FlyBodyGyro = Instance.new("BodyGyro")
         -- Use randomized name
-        flyBodyGyro.Name = _G.getRandomInstanceName and _G.getRandomInstanceName() or ("BG_" .. math.random(10000, 99999))
-        flyBodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-        flyBodyGyro.P = 50000
-        flyBodyGyro.D = 1000
-        flyBodyGyro.Parent = hrp
+        FlyBodyGyro.Name = _G.getRandomInstanceName and _G.getRandomInstanceName() or ("BG_" .. math.random(10000, 99999))
+        FlyBodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+        FlyBodyGyro.P = 50000
+        FlyBodyGyro.D = 1000
+        FlyBodyGyro.Parent = hrp
         
         -- Enforce climbing state when it changes (except for dead/ragdoll/physics)
         -- This is the key anti-AFK mechanism - always force back to climbing immediately
@@ -16129,9 +15500,50 @@ VisualSection:Toggle({
                 flyBodyVelocity.Velocity = currentVel:Lerp(moveDirection, 0.2)
             end
             
-            -- Apply gyro to fully follow camera (up/down/left/right)
-            if flyBodyGyro and flyBodyGyro.Parent then
-                flyBodyGyro.CFrame = camCF
+            -- Apply gyro - respect Auto Look if enabled and has target
+            if FlyBodyGyro and FlyBodyGyro.Parent then
+                local useAutoLook = false
+                local autoLookCFrame = camCF
+                
+                -- Check if Auto Look should override horizontal rotation
+                if KillAuraAutoLook and KillAuraEnabled then
+                    -- Find nearest zombie to look at
+                    local zombiesFolder = Workspace:FindFirstChild("Zombies")
+                    if zombiesFolder then
+                        local nearestDist = math.huge
+                        local nearestPos = nil
+                        local hrpPos = hrp.Position
+                        
+                        for _, zombie in ipairs(zombiesFolder:GetChildren()) do
+                            local head = zombie:FindFirstChild("Head")
+                            if head then
+                                local dist = (head.Position - hrpPos).Magnitude
+                                if dist < nearestDist and dist <= KillAuraRange then
+                                    nearestDist = dist
+                                    nearestPos = head.Position
+                                end
+                            end
+                        end
+                        
+                        if nearestPos then
+                            useAutoLook = true
+                            -- Calculate horizontal look direction to target
+                            local lookAt = Vector3.new(nearestPos.X, hrpPos.Y, nearestPos.Z)
+                            local direction = (lookAt - hrpPos)
+                            if direction.Magnitude > 0.1 then
+                                -- Get camera's pitch (up/down angle) but use target's yaw (left/right)
+                                local targetYaw = math.atan2(direction.X, direction.Z)
+                                local camLook = camCF.LookVector
+                                local camPitch = math.asin(math.clamp(camLook.Y, -1, 1))
+                                
+                                -- Build CFrame: target's horizontal rotation + camera's pitch
+                                autoLookCFrame = CFrame.new(hrpPos) * CFrame.Angles(0, targetYaw, 0) * CFrame.Angles(camPitch, 0, 0)
+                            end
+                        end
+                    end
+                end
+                
+                FlyBodyGyro.CFrame = autoLookCFrame
             end
         end)
     end
@@ -16166,9 +15578,9 @@ VisualSection:Toggle({
         end
         
         -- Remove BodyGyro
-        if flyBodyGyro then
-            flyBodyGyro:Destroy()
-            flyBodyGyro = nil
+        if FlyBodyGyro then
+            FlyBodyGyro:Destroy()
+            FlyBodyGyro = nil
         end
         
         -- Reset humanoid state to normal
@@ -18119,12 +17531,12 @@ task.wait(0.1) -- Delay to prevent lag
 do -- // Final task.spawn and connects
         WindUI:Notify({
             Title = "Katchi Hub Loaded",
-            Content = "Successfully loaded Katchi Hub v4.1\nUse RightShift key to toggle the menu",
+            Content = "Successfully loaded Katchi Hub v4.2\nUse RightShift key to toggle the menu",
             Duration = 5,
             Icon = "zap",
         })
 
-    print("Katchi Hub v4.1 successfully loaded!")
+    print("Katchi Hub v4.2 successfully loaded!")
     print("Made by Yuki")
     print("i like dawgs!")
 end -- end of Final block
@@ -18137,6 +17549,16 @@ do -- // Changelog Popup UI
     -- Changelog entries (each entry is a version with its changes)
     -- Format: { version = "vX.X.X", date = "Date", changes = { {type = "fix/feature/update", text = "Description"}, ... } }
     local CHANGELOG_ENTRIES = {
+                                                                        {
+            version = "v4.2",
+            date = "January 2026",
+            changes = {
+                {type = "fix", text = "Fixed Minor Bugs"},
+                {type = "fix", text = "Reduced Lag From Bypass"},
+                {type = "fix", text = "Improved Bypass for Other Features"},
+                {type = "fix", text = "Fixed Fullbright And No Fog Bug and issues"},
+            }
+        },
                                                                 {
             version = "v4.1",
             date = "January 2026",
