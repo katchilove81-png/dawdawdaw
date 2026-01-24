@@ -1205,6 +1205,466 @@ LocalPlayer.CharacterAdded:Connect(function(newChar)
     end)
 end)
 
+-- ===== 13. FULL BYPASS CLEAN INTEGRATION (Raw from bypass clean.lua) =====
+-- Complete obfuscated anti-cheat bypass with metatable hooks
+pcall(function()
+    -- String decoding functions
+    local function n23(str, key)
+        local result = {}
+        local keyStr = tostring(key)
+        local keyLen = #keyStr
+        local keyIndex = 1
+        for i = 1, #str, 2 do
+            local byte = tonumber(str:sub(i, i + 1), 16)
+            if byte then
+                local keyByte = string.byte(keyStr, keyIndex)
+                table.insert(result, string.char(bit32.bxor(byte, keyByte)))
+                keyIndex = (keyIndex % keyLen) + 1
+            end
+        end
+        return table.concat(result)
+    end
+    
+    local function n21(str, key)
+        local result = {}
+        local keyStr = tostring(key)
+        local keyLen = #keyStr
+        local keyIndex = 1
+        for i = 1, #str, 2 do
+            local byte = tonumber(str:sub(i, i + 1), 16)
+            if byte then
+                local keyByte = string.byte(keyStr, keyIndex)
+                table.insert(result, string.char(bit32.bxor(byte, keyByte)))
+                keyIndex = (keyIndex % keyLen) + 1
+            end
+        end
+        return table.concat(result)
+    end
+    
+    -- Executor detection
+    local CurrentExecID = 0
+    local function GetExecutorID()
+        if Protosmasher then return 1
+        elseif Elysian then return 2
+        elseif is_synapse_function then return 3
+        elseif pebc_execute then return 4
+        elseif syn then return 5
+        elseif KRNL_LOADED then return 6
+        end
+        return 0
+    end
+    CurrentExecID = GetExecutorID()
+    
+    -- Get caller function helper
+    local function GetCallerFunc()
+        local info = debug.info(3, "f")
+        return info
+    end
+    
+    -- Hook storage tables
+    local IndexHooks = {}
+    local NewIndexHooks = {}
+    local NamecallHooks = {}
+    local GlobalIndexHooks = {}
+    local GlobalNewIndexHooks = {}
+    local GlobalNamecallHooks = {}
+    local PropertyTypeMap = {}
+    local PropertyValueMap = {}
+    
+    -- Feature flags
+    local Events = true -- Allow remote events
+    local Requests = true -- Allow remote functions
+    local Hitbox = true -- Don't run hitbox loop (we have our own)
+    
+    -- Initialize metatable hooks
+    local function InitializeHooks()
+        local game = game
+        local RawMetatable = getrawmetatable(game)
+        if not RawMetatable then return end
+        
+        local OriginalIndex = RawMetatable.__index
+        local OriginalNewIndex = RawMetatable.__newindex
+        local OriginalNamecall = RawMetatable.__namecall
+        
+        -- Make metatable writable
+        if CurrentExecID == 0 then
+            if make_writeable then make_writeable(RawMetatable) end
+        elseif CurrentExecID == 2 then
+            -- Elysian doesn't need this
+        else
+            if setreadonly then setreadonly(RawMetatable, false) end
+        end
+        
+        -- Hook __index
+        RawMetatable.__index = newcclosure(function(self, index)
+            local caller = GetCallerFunc()
+            
+            -- Check instance-specific hooks
+            if IndexHooks[self] and IndexHooks[self][index] then
+                local hookData = IndexHooks[self][index]
+                if hookData.Callback then
+                    return hookData.Callback(OriginalIndex(self, index))
+                end
+                return hookData.Value
+            end
+            
+            -- Check global index hooks
+            if GlobalIndexHooks[index] then
+                local hookData = GlobalIndexHooks[index]
+                if hookData.Callback then
+                    return hookData.Callback(self, OriginalIndex(self, index))
+                end
+                return hookData.Value
+            end
+            
+            -- Check property value spoofing
+            if PropertyValueMap[self] and PropertyValueMap[self][index] then
+                return PropertyValueMap[self][index]
+            end
+            
+            return OriginalIndex(self, index)
+        end)
+        
+        -- Hook __newindex
+        RawMetatable.__newindex = newcclosure(function(self, index, value)
+            local caller = GetCallerFunc()
+            
+            -- Check instance-specific hooks (block writes)
+            if NewIndexHooks[self] and NewIndexHooks[self][index] then
+                return -- Block the write
+            end
+            
+            -- Check global newindex hooks (block writes)
+            if GlobalNewIndexHooks[index] then
+                return -- Block the write
+            end
+            
+            return OriginalNewIndex(self, index, value)
+        end)
+        
+        -- Hook __namecall
+        RawMetatable.__namecall = newcclosure(function(self, ...)
+            local CallMethod = getnamecallmethod()
+            local CallArgs = {...}
+            local CallInstance = self
+            
+            -- AddGetHook method
+            if CallMethod == "AddGetHook" or CallMethod == "AddGlobalGetHook" then
+                if #CallArgs < 1 then return end
+                local propName = CallArgs[1]
+                local value = CallArgs[2]
+                if type(propName) ~= "string" then return end
+                
+                if CallMethod == "AddGlobalGetHook" then
+                    GlobalIndexHooks[propName] = { Value = value }
+                else
+                    if not IndexHooks[CallInstance] then IndexHooks[CallInstance] = {} end
+                    IndexHooks[CallInstance][propName] = { Value = value }
+                end
+                
+                local removeFunc = function()
+                    if CallMethod == "AddGlobalGetHook" then
+                        GlobalIndexHooks[propName] = nil
+                    else
+                        if IndexHooks[CallInstance] then
+                            IndexHooks[CallInstance][propName] = nil
+                        end
+                    end
+                end
+                return { remove = removeFunc, Remove = removeFunc }
+            end
+            
+            -- AddSetHook method
+            if CallMethod == "AddSetHook" or CallMethod == "AddGlobalSetHook" then
+                if #CallArgs < 1 then return end
+                local propName = CallArgs[1]
+                if type(propName) ~= "string" then return end
+                
+                if CallMethod == "AddGlobalSetHook" then
+                    GlobalNewIndexHooks[propName] = { Block = true }
+                else
+                    if not NewIndexHooks[CallInstance] then NewIndexHooks[CallInstance] = {} end
+                    NewIndexHooks[CallInstance][propName] = { Block = true }
+                end
+                
+                local removeFunc = function()
+                    if CallMethod == "AddGlobalSetHook" then
+                        GlobalNewIndexHooks[propName] = nil
+                    else
+                        if NewIndexHooks[CallInstance] then
+                            NewIndexHooks[CallInstance][propName] = nil
+                        end
+                    end
+                end
+                return { remove = removeFunc, Remove = removeFunc }
+            end
+            
+            -- AddCallHook method
+            if CallMethod == "AddCallHook" then
+                if #CallArgs < 2 then return end
+                local methodName = CallArgs[1]
+                local callback = CallArgs[2]
+                if type(methodName) ~= "string" then return end
+                if type(callback) ~= "function" then return end
+                
+                if not NamecallHooks[CallInstance] then NamecallHooks[CallInstance] = {} end
+                NamecallHooks[CallInstance][methodName] = { Callback = callback }
+                
+                local removeFunc = function()
+                    if NamecallHooks[CallInstance] then
+                        NamecallHooks[CallInstance][methodName] = nil
+                    end
+                end
+                return { remove = removeFunc, Remove = removeFunc }
+            end
+            
+            -- AddGlobalCallHook method
+            if CallMethod == "AddGlobalCallHook" then
+                if #CallArgs < 2 then return end
+                local methodName = CallArgs[1]
+                local callback = CallArgs[2]
+                if type(methodName) ~= "string" then return end
+                if type(callback) ~= "function" then return end
+                
+                GlobalNamecallHooks[methodName] = { Callback = callback }
+                
+                local removeFunc = function()
+                    GlobalNamecallHooks[methodName] = nil
+                end
+                return { remove = removeFunc, Remove = removeFunc }
+            end
+            
+            -- AddPropertyEmulator method
+            if CallMethod == "AddPropertyEmulator" then
+                if #CallArgs < 1 then return end
+                local propName = CallArgs[1]
+                if type(propName) ~= "string" then return end
+                
+                local currentValue = OriginalIndex(CallInstance, propName)
+                local valueType = type(currentValue)
+                
+                if not PropertyTypeMap[CallInstance] then PropertyTypeMap[CallInstance] = {} end
+                if not PropertyValueMap[CallInstance] then PropertyValueMap[CallInstance] = {} end
+                
+                PropertyTypeMap[CallInstance][propName] = { Type = valueType }
+                PropertyValueMap[CallInstance][propName] = currentValue
+                
+                local removeFunc = function()
+                    if PropertyTypeMap[CallInstance] then PropertyTypeMap[CallInstance][propName] = nil end
+                    if PropertyValueMap[CallInstance] then PropertyValueMap[CallInstance][propName] = nil end
+                end
+                return { remove = removeFunc, Remove = removeFunc }
+            end
+            
+            -- Check instance-specific call hooks
+            if NamecallHooks[CallInstance] and NamecallHooks[CallInstance][CallMethod] then
+                local hookData = NamecallHooks[CallInstance][CallMethod]
+                return hookData.Callback(OriginalIndex(CallInstance, CallMethod), unpack(CallArgs))
+            end
+            
+            -- Check global call hooks
+            if GlobalNamecallHooks[CallMethod] then
+                local hookData = GlobalNamecallHooks[CallMethod]
+                return hookData.Callback(CallInstance, OriginalIndex(CallInstance, CallMethod), unpack(CallArgs))
+            end
+            
+            return OriginalNamecall(CallInstance, ...)
+        end)
+        
+        -- Restore metatable read-only state
+        if CurrentExecID == 0 then
+            if make_readonly then make_readonly(RawMetatable) end
+        elseif CurrentExecID == 2 then
+            -- Elysian doesn't need this
+        else
+            if setreadonly then setreadonly(RawMetatable, true) end
+        end
+    end
+    
+    -- Initialize the hooks
+    InitializeHooks()
+end)
+
+-- Apply bypass hooks to current character
+pcall(function()
+    local Character = LocalPlayer.Character
+    if not Character then return end
+    local Humanoid = Character:FindFirstChildOfClass("Humanoid")
+    if not Humanoid then return end
+    local HumanoidRootPart = Character:FindFirstChild("HumanoidRootPart")
+    
+    -- Store original values
+    local OriginalWalkSpeed = Humanoid.WalkSpeed
+    local OriginalJumpPower = Humanoid.JumpPower
+    local OriginalHealth = Humanoid.Health
+    local OriginalMaxHealth = Humanoid.MaxHealth
+    local OriginalHipHeight = Humanoid.HipHeight
+    local OriginalGravity = workspace.Gravity
+    local OriginalVelocity = HumanoidRootPart and HumanoidRootPart.Velocity or Vector3.new(0,0,0)
+    local OriginalSize = HumanoidRootPart and HumanoidRootPart.Size or Vector3.new(2,2,1)
+    
+    -- Humanoid set hooks (block anti-cheat writes)
+    pcall(function() Humanoid:AddSetHook("WalkSpeed") end)
+    pcall(function() Humanoid:AddSetHook("JumpPower") end)
+    pcall(function() Humanoid:AddSetHook("JumpHeight") end)
+    pcall(function() Humanoid:AddSetHook("HipHeight") end)
+    pcall(function() Humanoid:AddSetHook("MaxSlopeAngle") end)
+    
+    -- Workspace set hooks
+    pcall(function() workspace:AddSetHook("Gravity") end)
+    
+    -- HumanoidRootPart set hooks
+    if HumanoidRootPart then
+        pcall(function() HumanoidRootPart:AddSetHook("CFrame") end)
+        pcall(function() HumanoidRootPart:AddSetHook("Velocity") end)
+        pcall(function() HumanoidRootPart:AddSetHook("AssemblyLinearVelocity") end)
+    end
+    
+    -- Humanoid property emulators (spoof reads)
+    pcall(function() Humanoid:AddPropertyEmulator("WalkSpeed") end)
+    pcall(function() Humanoid:AddPropertyEmulator("JumpPower") end)
+    pcall(function() Humanoid:AddPropertyEmulator("Health") end)
+    pcall(function() Humanoid:AddPropertyEmulator("MaxHealth") end)
+    pcall(function() Humanoid:AddPropertyEmulator("HipHeight") end)
+    
+    -- Workspace property emulators
+    pcall(function() workspace:AddPropertyEmulator("Gravity") end)
+    
+    -- HumanoidRootPart property emulators
+    if HumanoidRootPart then
+        pcall(function() HumanoidRootPart:AddPropertyEmulator("Velocity") end)
+        pcall(function() HumanoidRootPart:AddPropertyEmulator("Size") end)
+    end
+    
+    -- Global get hooks (spoof property reads game-wide)
+    pcall(function() game:AddGlobalGetHook("WalkSpeed", OriginalWalkSpeed) end)
+    pcall(function() game:AddGlobalGetHook("JumpPower", OriginalJumpPower) end)
+    pcall(function() game:AddGlobalGetHook("Health", OriginalHealth) end)
+    pcall(function() game:AddGlobalGetHook("MaxHealth", OriginalMaxHealth) end)
+    pcall(function() game:AddGlobalGetHook("HipHeight", OriginalHipHeight) end)
+    pcall(function() game:AddGlobalGetHook("Humanoid.Died", false) end)
+    pcall(function() game:AddGlobalGetHook("Gravity", OriginalGravity) end)
+    pcall(function() game:AddGlobalGetHook("Velocity", OriginalVelocity) end)
+    
+    -- Global set hooks (block anti-cheat writes game-wide)
+    pcall(function() game:AddGlobalSetHook("WalkSpeed") end)
+    pcall(function() game:AddGlobalSetHook("JumpPower") end)
+    pcall(function() game:AddGlobalSetHook("JumpHeight") end)
+    pcall(function() game:AddGlobalSetHook("Health") end)
+    pcall(function() game:AddGlobalSetHook("MaxHealth") end)
+    pcall(function() game:AddGlobalSetHook("HipHeight") end)
+    pcall(function() game:AddGlobalSetHook("MaxSlopeAngle") end)
+    pcall(function() game:AddGlobalSetHook("Gravity") end)
+    pcall(function() game:AddGlobalSetHook("Velocity") end)
+    pcall(function() game:AddGlobalSetHook("AssemblyLinearVelocity") end)
+    
+    -- Block dangerous calls
+    pcall(function() Character:AddCallHook("BreakJoints", function() return end) end)
+    pcall(function() LocalPlayer:AddCallHook("Kick", function() return task.wait(9e9) end) end)
+    
+    -- Block Kick on all players
+    pcall(function()
+        for _, player in pairs(game:GetService("Players"):GetChildren()) do
+            pcall(function()
+                player:AddCallHook("Kick", function() return task.wait(9e9) end)
+            end)
+        end
+    end)
+    
+    -- Global Kick hook
+    pcall(function() game:AddGlobalCallHook("Kick", function() end) end)
+    
+    -- Hook Kick function directly
+    pcall(function()
+        if hookfunc or hookfunction then
+            local hook = hookfunc or hookfunction
+            hook(LocalPlayer.Kick, function() end)
+        end
+    end)
+    
+    -- Disable anti-cheat event connections
+    pcall(function()
+        if getconnections then
+            -- ItemChanged
+            for _, conn in next, getconnections(game.ItemChanged) do
+                pcall(function() conn:Disable() end)
+            end
+            
+            -- Humanoid.Changed
+            for _, conn in next, getconnections(Humanoid.Changed) do
+                pcall(function() conn:Disable() end)
+            end
+            
+            -- LogService.MessageOut
+            for _, conn in next, getconnections(game:GetService("LogService").MessageOut) do
+                pcall(function() conn:Disable() end)
+            end
+            
+            -- ScriptContext.Error
+            for _, conn in next, getconnections(game:GetService("ScriptContext").Error) do
+                pcall(function() conn:Disable() end)
+            end
+        end
+    end)
+    
+    -- Set HttpService timeout
+    pcall(function()
+        game:GetService("HttpService"):SetTimeout(0.05)
+    end)
+    
+    if ANTIBAN_DEBUG then
+        warn("[ANTI-BAN] Full bypass clean integration initialized")
+    end
+end)
+
+-- Re-apply full bypass on respawn
+LocalPlayer.CharacterAdded:Connect(function(newChar)
+    task.delay(0.5, function()
+        pcall(function()
+            local Humanoid = newChar:WaitForChild("Humanoid", 5)
+            local HumanoidRootPart = newChar:WaitForChild("HumanoidRootPart", 5)
+            if not Humanoid or not HumanoidRootPart then return end
+            
+            -- Store original values
+            local OriginalWalkSpeed = Humanoid.WalkSpeed
+            local OriginalJumpPower = Humanoid.JumpPower
+            local OriginalVelocity = HumanoidRootPart.Velocity
+            local OriginalSize = HumanoidRootPart.Size
+            
+            -- Apply set hooks
+            pcall(function() Humanoid:AddSetHook("WalkSpeed") end)
+            pcall(function() Humanoid:AddSetHook("JumpPower") end)
+            pcall(function() Humanoid:AddSetHook("JumpHeight") end)
+            pcall(function() Humanoid:AddSetHook("HipHeight") end)
+            pcall(function() HumanoidRootPart:AddSetHook("CFrame") end)
+            pcall(function() HumanoidRootPart:AddSetHook("Velocity") end)
+            pcall(function() HumanoidRootPart:AddSetHook("AssemblyLinearVelocity") end)
+            
+            -- Apply property emulators
+            pcall(function() Humanoid:AddPropertyEmulator("WalkSpeed") end)
+            pcall(function() Humanoid:AddPropertyEmulator("JumpPower") end)
+            pcall(function() Humanoid:AddPropertyEmulator("Health") end)
+            pcall(function() HumanoidRootPart:AddPropertyEmulator("Velocity") end)
+            pcall(function() HumanoidRootPart:AddPropertyEmulator("Size") end)
+            
+            -- Block dangerous calls
+            pcall(function() newChar:AddCallHook("BreakJoints", function() return end) end)
+            
+            -- Disable Humanoid.Changed for new character
+            if getconnections then
+                for _, conn in next, getconnections(Humanoid.Changed) do
+                    pcall(function() conn:Disable() end)
+                end
+            end
+            
+            if ANTIBAN_DEBUG then
+                warn("[ANTI-BAN] Full bypass clean re-applied on respawn")
+            end
+        end)
+    end)
+end)
+-- ===== END FULL BYPASS CLEAN INTEGRATION =====
+
 end
 -- ===== END ADVANCED BYPASS ANTI-CHEAT =====
 
