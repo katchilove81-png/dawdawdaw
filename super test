@@ -1693,7 +1693,7 @@ local Window = WindUI:CreateWindow({
 
     Window:SetIconSize(48)
     Window:Tag({
-        Title = "v4.1",
+        Title = "v4.2",
         Color = Color3.fromHex("#d9ff00") -- deep crimson
     })
     Window:Tag({
@@ -1725,13 +1725,13 @@ local Window = WindUI:CreateWindow({
     })
 
     InfoSection:Paragraph({
-        Title = "Katchi Hub v4.1",
+        Title = "Katchi Hub v4.2",
         Desc = "Professional Guts & BlackPowder Script Hub\nMade by Yuki\nExecutor: "..(identifyexecutor and identifyexecutor() or "Unknown"),
     })
 
     InfoSection:Paragraph({
         Title = "Changelogs",
-        Desc = "Fixes\n- Fixed Minor Bypass Bugs\n- Improved Kill Aura\n- Improved Animation Scanner (can Scan more animations now.)\n- Fixed Config Bug\n- Fixed Minor Bugs",
+        Desc = "Fixes\n- Fixed Minor Bugs\n- Reduced Lag From Bypass\n- Improved Bypass for Other Features\n- Fixed Fullbright And No Fog bug and issues",
     })
 
 -- Make sure this exists somewhere near the top of your script
@@ -8674,16 +8674,93 @@ local function KillAura_performKillAura(hrp)
         end
     end
 
-    -- Auto-look using BodyGyro (doesn't affect movement at all)
-    if KillAuraAutoLook and firstTarget and firstTarget.head and firstTarget.head.Parent then
+    -- Auto-look is now handled separately in KillAura_performAutoLook
+end
+
+-- Separate Auto Look function that finds the nearest zombie independently
+local function KillAura_performAutoLook(hrp)
+    if not KillAuraAutoLook then
+        -- Clean up BodyGyro when auto-look is disabled
         pcall(function()
-            local targetPos = firstTarget.head.Position
-            -- Calculate look direction (Y-axis only - horizontal rotation)
-            local lookAt = Vector3.new(targetPos.X, hrpPos.Y, targetPos.Z)
-            local direction = (lookAt - hrpPos)
-            
-            if direction.Magnitude > 0.1 then
-                -- Find or create our AutoLook BodyGyro
+            local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
+            if autoLookGyro then
+                autoLookGyro:Destroy()
+            end
+        end)
+        -- Re-enable fly gyro if flying
+        if FlyEnabled and FlyBodyGyro then
+            pcall(function() FlyBodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge) end)
+        end
+        return
+    end
+    
+    local hrpPos = hrp.Position
+    
+    -- Find the actual nearest zombie (independent of Kill Aura targeting)
+    local zombiesFolder = KillAura_getZombiesFolder()
+    if not zombiesFolder then
+        -- No zombies folder, clean up and re-enable fly
+        pcall(function()
+            local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
+            if autoLookGyro then autoLookGyro:Destroy() end
+        end)
+        if FlyEnabled and FlyBodyGyro then
+            pcall(function() FlyBodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge) end)
+        end
+        return
+    end
+    
+    local nearestHead = nil
+    local nearestDistSq = math.huge
+    local maxRange = 50 -- Auto look range (independent of kill aura range)
+    local maxRangeSq = maxRange * maxRange
+    
+    for _, model in ipairs(zombiesFolder:GetChildren()) do
+        if model:IsA("Model") then
+            local head = model:FindFirstChild("Head")
+            if head then
+                local headPos = head.Position
+                local dx, dy, dz = headPos.X - hrpPos.X, headPos.Y - hrpPos.Y, headPos.Z - hrpPos.Z
+                local d2 = dx*dx + dy*dy + dz*dz
+                if d2 < nearestDistSq and d2 <= maxRangeSq then
+                    nearestDistSq = d2
+                    nearestHead = head
+                end
+            end
+        end
+    end
+    
+    if nearestHead and nearestHead.Parent then
+        local targetPos = nearestHead.Position
+        -- Calculate look direction (Y-axis only - horizontal rotation)
+        local lookAt = Vector3.new(targetPos.X, hrpPos.Y, targetPos.Z)
+        local direction = (lookAt - hrpPos)
+        
+        if direction.Magnitude > 0.1 then
+            if FlyEnabled then
+                -- When flying: disable fly's BodyGyro and use our own
+                if FlyBodyGyro then
+                    pcall(function() FlyBodyGyro.MaxTorque = Vector3.new(0, 0, 0) end)
+                end
+                
+                -- Find or create our AutoLook BodyGyro with full torque
+                local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
+                if not autoLookGyro then
+                    autoLookGyro = Instance.new("BodyGyro")
+                    autoLookGyro.Name = "KatchiAutoLookGyro"
+                    autoLookGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+                    autoLookGyro.P = 50000
+                    autoLookGyro.D = 1000
+                    autoLookGyro.Parent = hrp
+                else
+                    -- Ensure full torque when flying
+                    autoLookGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+                end
+                
+                -- Set target rotation (full 3D look at target)
+                autoLookGyro.CFrame = CFrame.lookAt(hrpPos, lookAt)
+            else
+                -- Not flying: use Y-axis only rotation
                 local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
                 if not autoLookGyro then
                     autoLookGyro = Instance.new("BodyGyro")
@@ -8697,15 +8774,20 @@ local function KillAura_performKillAura(hrp)
                 -- Set target rotation
                 autoLookGyro.CFrame = CFrame.lookAt(hrpPos, hrpPos + direction.Unit)
             end
-        end)
+        end
     else
-        -- Clean up BodyGyro when auto-look is disabled or no target
+        -- No target: clean up BodyGyro and re-enable fly's BodyGyro
         pcall(function()
             local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
             if autoLookGyro then
                 autoLookGyro:Destroy()
             end
         end)
+        
+        -- Re-enable fly's BodyGyro if flying
+        if FlyEnabled and FlyBodyGyro then
+            pcall(function() FlyBodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge) end)
+        end
     end
 end
 
@@ -8825,6 +8907,11 @@ task.defer(function()
         end
         if KillAuraEnabled then
             KillAura_performKillAura(hrp)
+        end
+        
+        -- Auto Look runs independently (even without Kill Aura enabled)
+        if KillAuraAutoLook then
+            KillAura_performAutoLook(hrp)
         end
     end)
 end)
@@ -14043,6 +14130,738 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         })
     end -- End Custom Animation scope
 
+    -- === ANIMATION PRESETS SECTION ===
+    local AnimPresetSection = MiscTab:Section({ Title = "Animation Presets", Icon = "film", Opened = false })
+    
+    do -- Animation Presets scope
+        -- Animation preset state tracking
+        local presetPlayingTracks = {}
+        local presetLoopConnections = {}
+        local presetActiveStates = {}
+        
+        -- Helper function to get animator
+        local function getAnimator()
+            local char = LocalPlayer.Character
+            if not char then return nil end
+            local humanoid = char:FindFirstChildOfClass("Humanoid")
+            if not humanoid then return nil end
+            local animator = humanoid:FindFirstChildOfClass("Animator")
+            if not animator then
+                animator = Instance.new("Animator")
+                animator.Parent = humanoid
+            end
+            return animator, humanoid
+        end
+        
+        -- Helper function to stop all preset animations
+        local function stopAllPresets()
+            for name, tracks in pairs(presetPlayingTracks) do
+                for _, track in ipairs(tracks) do
+                    pcall(function() track:Stop() end)
+                end
+            end
+            presetPlayingTracks = {}
+            for name, conn in pairs(presetLoopConnections) do
+                pcall(function() 
+                    if type(conn) == "thread" then
+                        task.cancel(conn)
+                    elseif conn.Disconnect then
+                        conn:Disconnect()
+                    end
+                end)
+            end
+            presetLoopConnections = {}
+            presetActiveStates = {}
+            -- Restore walkspeed
+            pcall(function()
+                local char = LocalPlayer.Character
+                if char then
+                    local humanoid = char:FindFirstChildOfClass("Humanoid")
+                    if humanoid then humanoid.WalkSpeed = 16 end
+                end
+            end)
+        end
+        
+        -- Helper function to play idle/walk animation preset
+        local function playIdleWalkPreset(name, idleId, walkId, priority, walkSpeed)
+            local animator, humanoid = getAnimator()
+            if not animator then return end
+            
+            stopAllPresets()
+            presetActiveStates[name] = true
+            presetPlayingTracks[name] = {}
+            
+            -- Create idle animation
+            local idleAnim = Instance.new("Animation")
+            idleAnim.AnimationId = "rbxassetid://" .. idleId
+            local idleTrack = animator:LoadAnimation(idleAnim)
+            idleTrack.Priority = priority or Enum.AnimationPriority.Action3
+            idleTrack.Looped = true
+            table.insert(presetPlayingTracks[name], idleTrack)
+            
+            -- Create walk animation
+            local walkAnim = Instance.new("Animation")
+            walkAnim.AnimationId = "rbxassetid://" .. walkId
+            local walkTrack = animator:LoadAnimation(walkAnim)
+            walkTrack.Priority = priority or Enum.AnimationPriority.Action3
+            walkTrack.Looped = true
+            table.insert(presetPlayingTracks[name], walkTrack)
+            
+            -- Set walk speed if specified
+            if walkSpeed then
+                humanoid.WalkSpeed = walkSpeed
+            end
+            
+            -- Play based on movement
+            local lastMoving = false
+            idleTrack:Play()
+            
+            presetLoopConnections[name] = RunService.Heartbeat:Connect(function()
+                if not presetActiveStates[name] then return end
+                local isMoving = humanoid.MoveDirection.Magnitude > 0.1
+                if isMoving ~= lastMoving then
+                    if isMoving then
+                        idleTrack:Stop()
+                        walkTrack:Play()
+                    else
+                        walkTrack:Stop()
+                        idleTrack:Play()
+                    end
+                    lastMoving = isMoving
+                end
+            end)
+            
+            WindUI:Notify({ Title = "Animation Preset", Content = name .. " activated!", Duration = 2, Icon = "play" })
+        end
+        
+        -- Helper function to play one-shot animation
+        local function playOneShotPreset(name, animId, duration)
+            local animator, humanoid = getAnimator()
+            if not animator then return end
+            
+            local anim = Instance.new("Animation")
+            anim.AnimationId = "rbxassetid://" .. animId
+            local track = animator:LoadAnimation(anim)
+            track.Priority = Enum.AnimationPriority.Action4
+            track:Play()
+            
+            if not presetPlayingTracks[name] then presetPlayingTracks[name] = {} end
+            table.insert(presetPlayingTracks[name], track)
+            
+            if duration then
+                task.delay(duration, function()
+                    pcall(function() track:Stop() end)
+                end)
+            end
+            
+            WindUI:Notify({ Title = "Animation Preset", Content = name .. " playing!", Duration = 2, Icon = "play" })
+        end
+        
+        -- Helper function to play looping one-shot animation
+        local function playLoopingPreset(name, animId, interval)
+            local animator, humanoid = getAnimator()
+            if not animator then return end
+            
+            stopAllPresets()
+            presetActiveStates[name] = true
+            presetPlayingTracks[name] = {}
+            
+            local anim = Instance.new("Animation")
+            anim.AnimationId = "rbxassetid://" .. animId
+            local track = animator:LoadAnimation(anim)
+            track.Priority = Enum.AnimationPriority.Action4
+            table.insert(presetPlayingTracks[name], track)
+            
+            presetLoopConnections[name] = task.spawn(function()
+                while presetActiveStates[name] do
+                    track:Play()
+                    task.wait(interval or track.Length or 1)
+                end
+            end)
+            
+            WindUI:Notify({ Title = "Animation Preset", Content = name .. " activated!", Duration = 2, Icon = "play" })
+        end
+        
+        -- Stop All Presets Button
+        AnimPresetSection:Button({
+            Title = "Stop All Presets",
+            Desc = "Stop all animation presets and restore normal state",
+            Callback = function()
+                stopAllPresets()
+                WindUI:Notify({ Title = "Animation Preset", Content = "All presets stopped!", Duration = 2, Icon = "square" })
+            end
+        })
+        
+        -- ===== ZOMBIE ANIMATIONS =====
+        AnimPresetSection:Separator({ Text = "Zombie Animations" })
+        
+        AnimPresetSection:Button({
+            Title = "Ancient Zapper",
+            Desc = "Ancient Zapper zombie animation with effect",
+            Callback = function()
+                local animator, humanoid = getAnimator()
+                if not animator then return end
+                stopAllPresets()
+                presetActiveStates["Ancient Zapper"] = true
+                presetPlayingTracks["Ancient Zapper"] = {}
+                
+                -- Effect animation
+                local effectAnim = Instance.new("Animation")
+                effectAnim.AnimationId = "rbxassetid://12638401607"
+                local effectTrack = animator:LoadAnimation(effectAnim)
+                effectTrack.Priority = Enum.AnimationPriority.Action3
+                effectTrack.Looped = true
+                effectTrack:Play()
+                table.insert(presetPlayingTracks["Ancient Zapper"], effectTrack)
+                
+                playIdleWalkPreset("Ancient Zapper", "12333488814", "12333490576", Enum.AnimationPriority.Action2, nil)
+            end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Zapper Animation",
+            Desc = "Standard Zapper zombie animation",
+            Callback = function() playIdleWalkPreset("Zapper", "14498563473", "14498289874", Enum.AnimationPriority.Action3, nil) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Zapper Effect",
+            Desc = "Play Zapper special effect once",
+            Callback = function() playOneShotPreset("Zapper Effect", "14499470197", nil) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Shambler Animation",
+            Desc = "Shambler zombie idle/walk",
+            Callback = function() playIdleWalkPreset("Shambler", "12333488814", "14463730540", Enum.AnimationPriority.Action3, nil) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Old Shambler",
+            Desc = "Old Shambler zombie animation",
+            Callback = function() playIdleWalkPreset("Old Shambler", "12333488814", "12333490857", Enum.AnimationPriority.Idle, nil) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Shambler Eating",
+            Desc = "Shambler eating animation (10 sec)",
+            Callback = function() playOneShotPreset("Shambler Eating", "18339432914", 10) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Lantern Carrier",
+            Desc = "Lantern carrier zombie animation",
+            Callback = function() playIdleWalkPreset("Lantern Carrier", "14678879479", "14678880308", Enum.AnimationPriority.Action3, nil) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Cuirassier Animation",
+            Desc = "Cuirassier zombie animation",
+            Callback = function() playIdleWalkPreset("Cuirassier", "87579228279296", "102081698785465", Enum.AnimationPriority.Action3, nil) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Cuirassier Alt",
+            Desc = "Alternate Cuirassier animation",
+            Callback = function() playIdleWalkPreset("Cuirassier Alt", "82800474630427", "118210337289087", Enum.AnimationPriority.Action3, nil) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Headless Soldier (US)",
+            Desc = "Headless soldier zombie animation",
+            Callback = function() playIdleWalkPreset("Headless Soldier", "107080941320600", "74764025513892", Enum.AnimationPriority.Action3, nil) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Crawler",
+            Desc = "Crawling zombie animation",
+            Callback = function() playIdleWalkPreset("Crawler", "13726632691", "13726634549", Enum.AnimationPriority.Action3, nil) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Bomber Animation",
+            Desc = "Self-destruct bomber animation",
+            Callback = function() playIdleWalkPreset("Bomber", "13211198049", "13211207597", Enum.AnimationPriority.Action3, nil) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Ancient Default",
+            Desc = "Ancient default zombie animation",
+            Callback = function() playIdleWalkPreset("Ancient Default", "180435571", "180426354", Enum.AnimationPriority.Idle, nil) end
+        })
+        
+        -- ===== CHARACTER ANIMATIONS =====
+        AnimPresetSection:Separator({ Text = "Character Animations" })
+        
+        AnimPresetSection:Button({
+            Title = "Superman",
+            Desc = "Superman pose with increased speed (50)",
+            Callback = function() playIdleWalkPreset("Superman", "123279433658792", "123279433658792", Enum.AnimationPriority.Action3, 50) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Boxer",
+            Desc = "Boxing stance animation (click to punch)",
+            Callback = function() playIdleWalkPreset("Boxer", "124381258015151", "127477273497271", Enum.AnimationPriority.Action3, 17) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Dracula",
+            Desc = "Dracula vampire animation",
+            Callback = function() playIdleWalkPreset("Dracula", "14970033333", "15486477524", Enum.AnimationPriority.Action3, 16) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Lone Warrior",
+            Desc = "Lone warrior stance (slow walk)",
+            Callback = function() playIdleWalkPreset("Lone Warrior", "111210841378590", "139186204185685", Enum.AnimationPriority.Action3, 5) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Red Eyes",
+            Desc = "Red eyes animation with speed boost (50)",
+            Callback = function() playIdleWalkPreset("Red Eyes", "12581784105", "12581785298", Enum.AnimationPriority.Action3, 50) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Napoleon Hands Behind",
+            Desc = "Napoleon hands behind back pose",
+            Callback = function() playIdleWalkPreset("Napoleon", "103557875332543", "103557875332543", Enum.AnimationPriority.Action4, nil) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Freezing/Cold",
+            Desc = "Cold shivering animation",
+            Callback = function() playIdleWalkPreset("Cold", "16863977222", "16876434500", Enum.AnimationPriority.Action3, nil) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Low Health",
+            Desc = "Injured/low health animation",
+            Callback = function() playIdleWalkPreset("Low Health", "14970034680", "15530089342", Enum.AnimationPriority.Idle, nil) end
+        })
+        
+        -- ===== COMBAT ANIMATIONS =====
+        AnimPresetSection:Separator({ Text = "Combat Animations" })
+        
+        AnimPresetSection:Button({
+            Title = "Musket Charge",
+            Desc = "Musket charging animation (speed 24)",
+            Callback = function() playIdleWalkPreset("Musket Charge", "14292935158", "14292937831", Enum.AnimationPriority.Action3, 24) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Greatsword Charge",
+            Desc = "Greatsword charging animation (speed 24)",
+            Callback = function() playIdleWalkPreset("Greatsword Charge", "14284611111", "17406602570", Enum.AnimationPriority.Action3, 24) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Bayonet Charge",
+            Desc = "Standard bayonet charge (speed 24)",
+            Callback = function() playIdleWalkPreset("Bayonet Charge", "14284611111", "14284623849", Enum.AnimationPriority.Idle, 24) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Fake Bayonet",
+            Desc = "Fake bayonet stance (click for stab)",
+            Callback = function() playIdleWalkPreset("Fake Bayonet", "12333492041", "12333492041", Enum.AnimationPriority.Action3, 17) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Gun Spin",
+            Desc = "Spinning gun trick (looping)",
+            Callback = function() playLoopingPreset("Gun Spin", "15827239870", 0.73) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Elbow Strike",
+            Desc = "Elbow strike combo (looping)",
+            Callback = function() playLoopingPreset("Elbow Strike", "15345113937", 0.6) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "True Halo (Fast Slash)",
+            Desc = "Super fast slashing with spin",
+            Callback = function()
+                local animator, humanoid = getAnimator()
+                if not animator then return end
+                local char = LocalPlayer.Character
+                local rootPart = char and char:FindFirstChild("HumanoidRootPart")
+                if not rootPart then return end
+                
+                stopAllPresets()
+                presetActiveStates["True Halo"] = true
+                presetPlayingTracks["True Halo"] = {}
+                
+                local anim = Instance.new("Animation")
+                anim.AnimationId = "rbxassetid://12591938344"
+                local track = animator:LoadAnimation(anim)
+                track.Priority = Enum.AnimationPriority.Action4
+                table.insert(presetPlayingTracks["True Halo"], track)
+                
+                local rotationSpeed = 1440
+                
+                presetLoopConnections["True Halo"] = task.spawn(function()
+                    while presetActiveStates["True Halo"] do
+                        track:Play()
+                        local deltaTime = task.wait(0.1)
+                        if rootPart then
+                            rootPart.CFrame = rootPart.CFrame * CFrame.Angles(0, math.rad(rotationSpeed * 0.1), 0)
+                        end
+                    end
+                end)
+                
+                WindUI:Notify({ Title = "Animation Preset", Content = "True Halo activated!", Duration = 2, Icon = "play" })
+            end
+        })
+        
+        -- ===== SPECIAL ANIMATIONS =====
+        AnimPresetSection:Separator({ Text = "Special Animations" })
+        
+        AnimPresetSection:Button({
+            Title = "Play Dead",
+            Desc = "Play dead/faint animation",
+            Callback = function() playOneShotPreset("Play Dead", "89945348540089", nil) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Despair Dance",
+            Desc = "Sad despair dance (20 sec)",
+            Callback = function() playOneShotPreset("Despair Dance", "14860627011", 20) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Flying",
+            Desc = "Flying pose animation (looping)",
+            Callback = function() playLoopingPreset("Flying", "110087359963835", nil) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Candy Uncle (Headless)",
+            Desc = "Headless horseman with music (speed 70)",
+            Callback = function()
+                local animator, humanoid = getAnimator()
+                if not animator then return end
+                local char = LocalPlayer.Character
+                
+                stopAllPresets()
+                presetActiveStates["Candy Uncle"] = true
+                presetPlayingTracks["Candy Uncle"] = {}
+                
+                -- Create and play music
+                local music = Instance.new("Sound")
+                music.SoundId = "rbxassetid://1836635087"
+                music.Looped = true
+                music.Volume = 5
+                music.Parent = char:FindFirstChild("Head") or char
+                music:Play()
+                
+                humanoid.WalkSpeed = 70
+                
+                playIdleWalkPreset("Candy Uncle", "13936362530", "13936362530", Enum.AnimationPriority.Action3, 70)
+                
+                -- Store music for cleanup
+                presetLoopConnections["Candy Uncle Music"] = music
+            end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Eating Mystery",
+            Desc = "Eating something mysterious (looping)",
+            Callback = function()
+                local animator, humanoid = getAnimator()
+                if not animator then return end
+                
+                stopAllPresets()
+                presetActiveStates["Eating"] = true
+                presetPlayingTracks["Eating"] = {}
+                
+                local anim = Instance.new("Animation")
+                anim.AnimationId = "rbxassetid://16863982325"
+                local track = animator:LoadAnimation(anim)
+                track.Priority = Enum.AnimationPriority.Action4
+                table.insert(presetPlayingTracks["Eating"], track)
+                
+                presetLoopConnections["Eating"] = task.spawn(function()
+                    while presetActiveStates["Eating"] do
+                        track:Play()
+                        track:AdjustSpeed(0)
+                        track.TimePosition = 1.8
+                        track:AdjustSpeed(1)
+                        task.wait(0.1)
+                    end
+                end)
+                
+                WindUI:Notify({ Title = "Animation Preset", Content = "Eating activated!", Duration = 2, Icon = "play" })
+            end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Cross Use",
+            Desc = "Using a cross animation",
+            Callback = function() playOneShotPreset("Cross Use", "15210536563", nil) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Jacob",
+            Desc = "Jacob special animation",
+            Callback = function() playOneShotPreset("Jacob", "12404717502", nil) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Zombie King",
+            Desc = "Zombie King animation",
+            Callback = function() playOneShotPreset("Zombie King", "13408244121", nil) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Zombie Door Breach",
+            Desc = "Zombie breaking door animation",
+            Callback = function() playOneShotPreset("Door Breach", "15593727441", nil) end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Crawford",
+            Desc = "Crawford special animation",
+            Callback = function() playOneShotPreset("Crawford", "77859967130018", nil) end
+        })
+        
+        -- ===== INJURY ANIMATIONS =====
+        AnimPresetSection:Separator({ Text = "Injury Animations" })
+        
+        AnimPresetSection:Button({
+            Title = "Cuirassier Stabbed",
+            Desc = "Stabbed by cuirassier animation",
+            Callback = function()
+                local animator, humanoid = getAnimator()
+                if not animator then return end
+                
+                stopAllPresets()
+                humanoid.WalkSpeed = 0
+                
+                local anim1 = Instance.new("Animation")
+                anim1.AnimationId = "rbxassetid://121955221153387"
+                local track1 = animator:LoadAnimation(anim1)
+                track1.Priority = Enum.AnimationPriority.Action4
+                track1:Play()
+                
+                track1.Stopped:Connect(function()
+                    local anim2 = Instance.new("Animation")
+                    anim2.AnimationId = "rbxassetid://111210841378590"
+                    local track2 = animator:LoadAnimation(anim2)
+                    track2.Priority = Enum.AnimationPriority.Action4
+                    track2:Play()
+                    task.delay(4, function()
+                        humanoid.WalkSpeed = 16
+                    end)
+                end)
+                
+                WindUI:Notify({ Title = "Animation Preset", Content = "Stabbed animation playing!", Duration = 2, Icon = "play" })
+            end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Bone Fracture",
+            Desc = "Bone breaking/fracture animation",
+            Callback = function()
+                local animator, humanoid = getAnimator()
+                if not animator then return end
+                
+                stopAllPresets()
+                humanoid.WalkSpeed = 0
+                
+                local anim1 = Instance.new("Animation")
+                anim1.AnimationId = "rbxassetid://12333490324"
+                local track1 = animator:LoadAnimation(anim1)
+                track1.Priority = Enum.AnimationPriority.Action4
+                track1:Play()
+                
+                track1.Stopped:Connect(function()
+                    local anim2 = Instance.new("Animation")
+                    anim2.AnimationId = "rbxassetid://12333489072"
+                    local track2 = animator:LoadAnimation(anim2)
+                    track2.Priority = Enum.AnimationPriority.Action4
+                    track2:Play()
+                    task.delay(3, function()
+                        humanoid.WalkSpeed = 16
+                    end)
+                end)
+                
+                WindUI:Notify({ Title = "Animation Preset", Content = "Fracture animation playing!", Duration = 2, Icon = "play" })
+            end
+        })
+        
+        -- ===== CINEMATIC SEQUENCES =====
+        AnimPresetSection:Separator({ Text = "Cinematic Sequences" })
+        
+        AnimPresetSection:Button({
+            Title = "Old Blücher",
+            Desc = "Marshal Blücher cinematic sequence",
+            Callback = function()
+                local animator, humanoid = getAnimator()
+                if not animator then return end
+                
+                stopAllPresets()
+                presetActiveStates["Blucher"] = true
+                
+                -- Stop all current animations
+                for _, track in pairs(humanoid:GetPlayingAnimationTracks()) do
+                    track:Stop()
+                end
+                
+                local animIds = {"15603033178", "16168689655", "15680560478", "15688743558", "15637342030"}
+                local tracks = {}
+                
+                for i, id in ipairs(animIds) do
+                    local anim = Instance.new("Animation")
+                    anim.AnimationId = "rbxassetid://" .. id
+                    tracks[i] = animator:LoadAnimation(anim)
+                    tracks[i].Priority = Enum.AnimationPriority.Action4
+                end
+                
+                task.spawn(function()
+                    if not presetActiveStates["Blucher"] then return end
+                    tracks[1]:Play()
+                    tracks[1].Stopped:Wait()
+                    
+                    if not presetActiveStates["Blucher"] then return end
+                    tracks[2]:Play()
+                    tracks[2].Stopped:Wait()
+                    
+                    if not presetActiveStates["Blucher"] then return end
+                    tracks[3]:Play()
+                    task.wait(3)
+                    if tracks[3].IsPlaying then tracks[3]:Stop() end
+                    
+                    if not presetActiveStates["Blucher"] then return end
+                    tracks[4]:Play()
+                    tracks[4].Stopped:Wait()
+                    
+                    if not presetActiveStates["Blucher"] then return end
+                    tracks[3]:Play()
+                    task.wait(3)
+                    if tracks[3].IsPlaying then tracks[3]:Stop() end
+                    
+                    if not presetActiveStates["Blucher"] then return end
+                    tracks[5]:Play()
+                    tracks[5].Stopped:Wait()
+                    
+                    presetActiveStates["Blucher"] = false
+                    WindUI:Notify({ Title = "Animation Preset", Content = "Blücher sequence complete!", Duration = 2, Icon = "check" })
+                end)
+                
+                WindUI:Notify({ Title = "Animation Preset", Content = "Blücher sequence started!", Duration = 2, Icon = "play" })
+            end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Adjutant",
+            Desc = "Adjutant officer cinematic sequence",
+            Callback = function()
+                local animator, humanoid = getAnimator()
+                if not animator then return end
+                
+                stopAllPresets()
+                presetActiveStates["Adjutant"] = true
+                
+                for _, track in pairs(humanoid:GetPlayingAnimationTracks()) do
+                    track:Stop()
+                end
+                
+                local animIds = {"15603037116", "15622136729", "15688841016", "15637317651"}
+                local tracks = {}
+                
+                for i, id in ipairs(animIds) do
+                    local anim = Instance.new("Animation")
+                    anim.AnimationId = "rbxassetid://" .. id
+                    tracks[i] = animator:LoadAnimation(anim)
+                    tracks[i].Priority = Enum.AnimationPriority.Action4
+                end
+                
+                task.spawn(function()
+                    if not presetActiveStates["Adjutant"] then return end
+                    tracks[1]:Play()
+                    tracks[1].Stopped:Wait()
+                    
+                    if not presetActiveStates["Adjutant"] then return end
+                    tracks[2]:Play()
+                    tracks[2].Stopped:Wait()
+                    
+                    if not presetActiveStates["Adjutant"] then return end
+                    tracks[3]:Play()
+                    task.wait(9)
+                    if tracks[3].IsPlaying then tracks[3]:Stop() end
+                    
+                    if not presetActiveStates["Adjutant"] then return end
+                    tracks[4]:Play()
+                    tracks[4].Stopped:Wait()
+                    
+                    presetActiveStates["Adjutant"] = false
+                    WindUI:Notify({ Title = "Animation Preset", Content = "Adjutant sequence complete!", Duration = 2, Icon = "check" })
+                end)
+                
+                WindUI:Notify({ Title = "Animation Preset", Content = "Adjutant sequence started!", Duration = 2, Icon = "play" })
+            end
+        })
+        
+        AnimPresetSection:Button({
+            Title = "Barry the Biter",
+            Desc = "Barry getting bitten cinematic sequence",
+            Callback = function()
+                local animator, humanoid = getAnimator()
+                if not animator then return end
+                
+                stopAllPresets()
+                presetActiveStates["Barry"] = true
+                
+                for _, track in pairs(humanoid:GetPlayingAnimationTracks()) do
+                    track:Stop()
+                end
+                
+                local animIds = {"14284371664", "14284387207", "14284382730", "14304936421"}
+                local tracks = {}
+                
+                for i, id in ipairs(animIds) do
+                    local anim = Instance.new("Animation")
+                    anim.AnimationId = "rbxassetid://" .. id
+                    tracks[i] = animator:LoadAnimation(anim)
+                    tracks[i].Priority = Enum.AnimationPriority.Action4
+                end
+                
+                task.spawn(function()
+                    if not presetActiveStates["Barry"] then return end
+                    tracks[1]:Play()
+                    tracks[1].Stopped:Wait()
+                    
+                    if not presetActiveStates["Barry"] then return end
+                    tracks[2]:Play()
+                    task.wait(10)
+                    if tracks[2].IsPlaying then tracks[2]:Stop() end
+                    
+                    if not presetActiveStates["Barry"] then return end
+                    tracks[3]:Play()
+                    tracks[3].Stopped:Wait()
+                    
+                    if not presetActiveStates["Barry"] then return end
+                    tracks[2]:Play(0, 1, -1) -- Play reversed
+                    task.wait(3)
+                    if tracks[2].IsPlaying then tracks[2]:Stop() end
+                    
+                    if not presetActiveStates["Barry"] then return end
+                    tracks[4]:Play()
+                    tracks[4].Stopped:Wait()
+                    
+                    presetActiveStates["Barry"] = false
+                    WindUI:Notify({ Title = "Animation Preset", Content = "Barry sequence complete!", Duration = 2, Icon = "check" })
+                end)
+                
+                WindUI:Notify({ Title = "Animation Preset", Content = "Barry sequence started!", Duration = 2, Icon = "play" })
+            end
+        })
+        
+    end -- End Animation Presets scope
+
     -- === OLD GUARD TEMPORARY SECTION ===
     local OldGuardSection = MiscTab:Section({ Title = "Old Guard Temporary", Icon = "shield", Opened = false })
     
@@ -14960,290 +15779,77 @@ local AutoRemoveHorsesToggle = VisualSection:Toggle({
 _G.KatchiToggleElements = _G.KatchiToggleElements or {}
 _G.KatchiToggleElements.AutoRemoveHorses = AutoRemoveHorsesToggle
 
--- === Optimized Visuals: Fullbright (event-driven) & NoFog (event-driven) ===
-local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
+-- === Simplified Visuals: Fullbright & NoFog ===
 local Lighting = game:GetService("Lighting")
 
 local fullbrightEnabled = false
 local noFogEnabled = false
-
--- Keep track of connections so we can disconnect cleanly
-local conns = {
-    lightingPropertyChanged = nil,
-    lightingChildAdded = nil,
-    workspaceDescendantAdded = nil,
-}
 
 -- Save originals for restoration
 local originalLighting = {
     Brightness = Lighting.Brightness,
     ClockTime = Lighting.ClockTime,
     FogEnd = Lighting.FogEnd,
-    FogStart = Lighting.FogStart,
     GlobalShadows = Lighting.GlobalShadows,
     OutdoorAmbient = Lighting.OutdoorAmbient,
-    Ambient = Lighting.Ambient
 }
 
--- Track modified instances and their original states so we can restore later
--- Use weak keys so destroyed instances get garbage collected
-local modifiedEffects = setmetatable({}, { __mode = "k" })    -- { [instance] = {ClassName="BloomEffect", OriginalEnabled=true} }
-local modifiedAtmospheres = setmetatable({}, { __mode = "k" }) -- { [instance] = {Density = X, Haze = Y, Offset = Z} }
-
--- Utility safe setter
-local function safeSet(obj, prop, val)
-    pcall(function() obj[prop] = val end)
-end
-
--- Disable known lighting post-process effects and record originals
-local function disableLightingEffectsOnce()
-    for _, inst in ipairs(Lighting:GetDescendants()) do
-        if inst:IsA("ColorCorrection") or inst:IsA("BloomEffect")
-            or inst:IsA("SunRaysEffect") or inst:IsA("BlurEffect") then
-            if not modifiedEffects[inst] then
-                modifiedEffects[inst] = { OriginalEnabled = inst.Enabled }
-                pcall(function() inst.Enabled = false end)
-            end
-        end
-    end
-end
-
-local function restoreLightingEffects()
-    for inst, info in pairs(modifiedEffects) do
-        if inst and inst.Parent then
-            pcall(function() inst.Enabled = info.OriginalEnabled end)
-        end
-    end
-    modifiedEffects = setmetatable({}, { __mode = "k" })
-end
-
--- Disable atmospheres (record originals) in workspace
-local function disableAtmospheresOnce()
-    for _, inst in ipairs(Workspace:GetDescendants()) do
-        if inst:IsA("Atmosphere") then
-            if not modifiedAtmospheres[inst] then
-                modifiedAtmospheres[inst] = {
-                    Density = inst.Density,
-                    Haze = inst.Haze,
-                    Offset = inst.Offset
-                }
-                pcall(function()
-                    inst.Density = 0
-                    inst.Haze = 0
-                    inst.Offset = 0
-                end)
-            end
-        end
-    end
-end
-
-local function restoreAtmospheres()
-    for inst, info in pairs(modifiedAtmospheres) do
-        if inst and inst.Parent then
-            pcall(function()
-                inst.Density = info.Density
-                inst.Haze = info.Haze
-                inst.Offset = info.Offset
-            end)
-        end
-    end
-    modifiedAtmospheres = setmetatable({}, { __mode = "k" })
-end
-
--- Reapply lighting values (used by property-change handler)
-local function applyFullbrightLighting()
+-- Simple Fullbright - just set values once
+local function applyFullbright()
     pcall(function()
         Lighting.Brightness = 2
         Lighting.ClockTime = 14
-        Lighting.FogEnd = 1e6
-        if Lighting.FogStart ~= nil then Lighting.FogStart = 0 end
-        Lighting.GlobalShadows = false
-        Lighting.OutdoorAmbient = Color3.fromRGB(128,128,128)
-        Lighting.Ambient = Color3.fromRGB(128,128,128)
-    end)
-end
-
--- Reapply fog removal
-local function applyNoFog()
-    pcall(function()
         Lighting.FogEnd = 100000
-        if Lighting.FogStart ~= nil then Lighting.FogStart = 0 end
+        Lighting.GlobalShadows = false
+        Lighting.OutdoorAmbient = Color3.fromRGB(128, 128, 128)
     end)
 end
 
--- Start Fullbright: set once, disable effects/atmospheres and attach listeners
-local function startFullbright()
-    -- set desired lighting now
-    applyFullbrightLighting()
-
-    -- disable existing effects/atmospheres
-    disableLightingEffectsOnce()
-    disableAtmospheresOnce()
-
-    -- listen for future Lighting children (post-processes) and disable them when added
-    if not conns.lightingChildAdded then
-        conns.lightingChildAdded = Lighting.ChildAdded:Connect(function(child)
-            if child:IsA("ColorCorrection") or child:IsA("BloomEffect")
-                or child:IsA("SunRaysEffect") or child:IsA("BlurEffect") then
-                if not modifiedEffects[child] then
-                    modifiedEffects[child] = { OriginalEnabled = child.Enabled }
-                    pcall(function() child.Enabled = false end)
-                end
-            end
-        end)
-    end
-
-    -- listen for Atmosphere added to workspace
-    if not conns.workspaceDescendantAdded then
-        conns.workspaceDescendantAdded = Workspace.DescendantAdded:Connect(function(desc)
-            if desc:IsA("Atmosphere") then
-                if not modifiedAtmospheres[desc] then
-                    modifiedAtmospheres[desc] = {
-                        Density = desc.Density,
-                        Haze = desc.Haze,
-                        Offset = desc.Offset
-                    }
-                    pcall(function()
-                        desc.Density = 0
-                        desc.Haze = 0
-                        desc.Offset = 0
-                    end)
-                end
-            end
-        end)
-    end
-
-    -- If something (game scripts) changes Lighting properties, reapply ours
-    if not conns.lightingPropertyChanged then
-        conns.lightingPropertyChanged = {}
-        local props = {"Brightness","ClockTime","FogEnd","FogStart","GlobalShadows","OutdoorAmbient","Ambient"}
-        for _, prop in ipairs(props) do
-            local ok, conn = pcall(function()
-                return Lighting:GetPropertyChangedSignal(prop):Connect(function()
-                    -- only reapply the values that Fullbright owns
-                    applyFullbrightLighting()
-                end)
-            end)
-            if ok and conn then
-                table.insert(conns.lightingPropertyChanged, conn)
-            end
-        end
-    end
-end
-
-local function stopFullbright()
-    -- disconnect listeners
-    if conns.lightingChildAdded then conns.lightingChildAdded:Disconnect(); conns.lightingChildAdded = nil end
-    if conns.workspaceDescendantAdded then conns.workspaceDescendantAdded:Disconnect(); conns.workspaceDescendantAdded = nil end
-    if conns.lightingPropertyChanged then
-        for _, c in ipairs(conns.lightingPropertyChanged) do
-            if c and c.Disconnect then pcall(function() c:Disconnect() end) end
-        end
-        conns.lightingPropertyChanged = nil
-    end
-
-    -- restore lighting values (but if NoFog still enabled, keep Fog settings removed)
+local function restoreFullbright()
     pcall(function()
         Lighting.Brightness = originalLighting.Brightness
         Lighting.ClockTime = originalLighting.ClockTime
-        -- Fog restored below depending on noFogEnabled
+        if not noFogEnabled then
+            Lighting.FogEnd = originalLighting.FogEnd
+        end
         Lighting.GlobalShadows = originalLighting.GlobalShadows
         Lighting.OutdoorAmbient = originalLighting.OutdoorAmbient
-        Lighting.Ambient = originalLighting.Ambient
     end)
-
-    -- restore effects & atmospheres that we changed (NoFog may also have modified FogEnd/Start; handled below)
-    restoreLightingEffects()
-    restoreAtmospheres()
 end
 
--- Start NoFog: similar but only affects Fog and Atmosphere
-local function startNoFog()
-    applyNoFog()
-    disableAtmospheresOnce()
-
-    -- reuse workspace descendant listener to catch future Atmospheres (if not already connected)
-    if not conns.workspaceDescendantAdded then
-        conns.workspaceDescendantAdded = Workspace.DescendantAdded:Connect(function(desc)
-            if desc:IsA("Atmosphere") then
-                if not modifiedAtmospheres[desc] then
-                    modifiedAtmospheres[desc] = {
-                        Density = desc.Density,
-                        Haze = desc.Haze,
-                        Offset = desc.Offset
-                    }
-                    pcall(function()
-                        desc.Density = 0
-                        desc.Haze = 0
-                        desc.Offset = 0
-                    end)
-                end
-            end
-        end)
-    end
-
-    -- keep Fog values stable if something tries to change them
-    if not conns.lightingPropertyChanged then
-        conns.lightingPropertyChanged = {}
-    end
-    if not conns._fogWatcher then
-        conns._fogWatcher = Lighting:GetPropertyChangedSignal("FogEnd"):Connect(function()
-            applyNoFog()
-        end)
-        table.insert(conns.lightingPropertyChanged, conns._fogWatcher)
-    end
-    if not conns._fogStartWatcher then
-        conns._fogStartWatcher = Lighting:GetPropertyChangedSignal("FogStart"):Connect(function()
-            applyNoFog()
-        end)
-        table.insert(conns.lightingPropertyChanged, conns._fogStartWatcher)
-    end
-end
-
-local function stopNoFog()
-    -- If fullbright is enabled we should not restore fog (fullbright owns fog state)
-    if fullbrightEnabled then
-        -- No action: fullbright will continue enforcing fog removal
-        return
-    end
-
-    -- Disconnect fog watchers if any (but we leave workspaceDescendantAdded only if fullbright isn't running)
-    if conns._fogWatcher then conns._fogWatcher:Disconnect(); conns._fogWatcher = nil end
-    if conns._fogStartWatcher then conns._fogStartWatcher:Disconnect(); conns._fogStartWatcher = nil end
-
-    -- restore Fog values
+-- Simple NoFog - just set FogEnd and destroy Atmospheres
+local function applyNoFog()
     pcall(function()
-        Lighting.FogEnd = originalLighting.FogEnd
-        if Lighting.FogStart ~= nil then
-            Lighting.FogStart = originalLighting.FogStart
+        Lighting.FogEnd = 100000
+        for _, v in pairs(Lighting:GetDescendants()) do
+            if v:IsA("Atmosphere") then
+                v:Destroy()
+            end
         end
     end)
+end
 
-    -- restore atmospheres we changed (unless fullbright is enabled)
+local function restoreNoFog()
     if not fullbrightEnabled then
-        restoreAtmospheres()
-        -- if no more features using workspaceDescendantAdded, disconnect it
-        if conns.workspaceDescendantAdded then
-            conns.workspaceDescendantAdded:Disconnect()
-            conns.workspaceDescendantAdded = nil
-        end
+        pcall(function()
+            Lighting.FogEnd = originalLighting.FogEnd
+        end)
     end
 end
 
--- UI toggles (replace your existing Callback bodies with these)
+-- UI toggles
 VisualSection:Toggle({
     Title = "Fullbright",
     Flag = "Visual_1",
-    Desc = "Loop fullbright (optimized)",
+    Desc = "Enable fullbright lighting",
     Default = false,
     Callback = function(state)
         fullbrightEnabled = state
         if state then
-            startFullbright()
+            applyFullbright()
             WindUI:Notify({ Title = "Visual", Content = "Fullbright enabled.", Duration = 2, Icon = "sun" })
         else
-            stopFullbright()
+            restoreFullbright()
             WindUI:Notify({ Title = "Visual", Content = "Fullbright disabled.", Duration = 2, Icon = "moon" })
         end
     end
@@ -15252,15 +15858,15 @@ VisualSection:Toggle({
 VisualSection:Toggle({
     Title = "No Fog",
     Flag = "Visual_2",
-    Desc = "Turn On No Fog (optimized)",
+    Desc = "Remove fog and atmospheres",
     Default = false,
     Callback = function(state)
         noFogEnabled = state
         if state then
-            startNoFog()
+            applyNoFog()
             WindUI:Notify({ Title = "Visual", Content = "NoFog enabled.", Duration = 2, Icon = "cloud-off" })
         else
-            stopNoFog()
+            restoreNoFog()
             WindUI:Notify({ Title = "Visual", Content = "NoFog disabled.", Duration = 2, Icon = "cloud" })
         end
     end
@@ -15396,7 +16002,7 @@ VisualSection:Toggle({
     FlyEnabled = false -- Global for keybind access
     FlySpeed = 40 -- Default fly speed
     local flyBodyVelocity = nil
-    local flyBodyGyro = nil
+    FlyBodyGyro = nil -- Global so Auto Look can detect flying
     local flyConnection = nil
     local flyAnimConnection = nil -- Connection to stop climb animations
     local flyStateConnection = nil -- Connection to enforce climbing state
@@ -15525,13 +16131,13 @@ VisualSection:Toggle({
         flyBodyVelocity.Parent = hrp
         
         -- Create BodyGyro for full 3D rotation following camera
-        flyBodyGyro = Instance.new("BodyGyro")
+        FlyBodyGyro = Instance.new("BodyGyro")
         -- Use randomized name
-        flyBodyGyro.Name = _G.getRandomInstanceName and _G.getRandomInstanceName() or ("BG_" .. math.random(10000, 99999))
-        flyBodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-        flyBodyGyro.P = 50000
-        flyBodyGyro.D = 1000
-        flyBodyGyro.Parent = hrp
+        FlyBodyGyro.Name = _G.getRandomInstanceName and _G.getRandomInstanceName() or ("BG_" .. math.random(10000, 99999))
+        FlyBodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+        FlyBodyGyro.P = 50000
+        FlyBodyGyro.D = 1000
+        FlyBodyGyro.Parent = hrp
         
         -- Enforce climbing state when it changes (except for dead/ragdoll/physics)
         -- This is the key anti-AFK mechanism - always force back to climbing immediately
@@ -15712,9 +16318,10 @@ VisualSection:Toggle({
                 flyBodyVelocity.Velocity = currentVel:Lerp(moveDirection, 0.2)
             end
             
-            -- Apply gyro to fully follow camera (up/down/left/right)
-            if flyBodyGyro and flyBodyGyro.Parent then
-                flyBodyGyro.CFrame = camCF
+            -- Apply gyro to follow camera (Auto Look manages this externally when it has a target)
+            -- Only apply if FlyBodyGyro has torque (Auto Look sets it to 0 when it takes over)
+            if FlyBodyGyro and FlyBodyGyro.Parent and FlyBodyGyro.MaxTorque.Magnitude > 0 then
+                FlyBodyGyro.CFrame = camCF
             end
         end)
     end
@@ -15749,13 +16356,25 @@ VisualSection:Toggle({
         end
         
         -- Remove BodyGyro
-        if flyBodyGyro then
-            flyBodyGyro:Destroy()
-            flyBodyGyro = nil
+        if FlyBodyGyro then
+            FlyBodyGyro:Destroy()
+            FlyBodyGyro = nil
+        end
+        
+        -- Clean up Auto Look BodyGyro if it exists (since fly is stopping)
+        local char = LocalPlayer and LocalPlayer.Character
+        if char then
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
+                if autoLookGyro then
+                    autoLookGyro:Destroy()
+                end
+            end
         end
         
         -- Reset humanoid state to normal
-        local char = LocalPlayer and LocalPlayer.Character
+        char = LocalPlayer and LocalPlayer.Character
         if char then
             local humanoid = char:FindFirstChildOfClass("Humanoid")
             if humanoid then
@@ -17702,12 +18321,12 @@ task.wait(0.1) -- Delay to prevent lag
 do -- // Final task.spawn and connects
         WindUI:Notify({
             Title = "Katchi Hub Loaded",
-            Content = "Successfully loaded Katchi Hub v4.1\nUse RightShift key to toggle the menu",
+            Content = "Successfully loaded Katchi Hub v4.2\nUse RightShift key to toggle the menu",
             Duration = 5,
             Icon = "zap",
         })
 
-    print("Katchi Hub v4.1 successfully loaded!")
+    print("Katchi Hub v4.2 successfully loaded!")
     print("Made by Yuki")
     print("i like dawgs!")
 end -- end of Final block
@@ -17720,6 +18339,16 @@ do -- // Changelog Popup UI
     -- Changelog entries (each entry is a version with its changes)
     -- Format: { version = "vX.X.X", date = "Date", changes = { {type = "fix/feature/update", text = "Description"}, ... } }
     local CHANGELOG_ENTRIES = {
+                                                                        {
+            version = "v4.2",
+            date = "January 2026",
+            changes = {
+                {type = "fix", text = "Fixed Minor Bugs"},
+                {type = "fix", text = "Reduced Lag From Bypass"},
+                {type = "fix", text = "Improved Bypass for Other Features"},
+                {type = "fix", text = "Fixed Fullbright And No Fog Bug and issues"},
+            }
+        },
                                                                 {
             version = "v4.1",
             date = "January 2026",
