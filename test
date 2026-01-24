@@ -2905,9 +2905,9 @@ local VirtualInputManager = game:GetService("VirtualInputManager")
 BOMBER_SAFE_TEAMMATES = false -- Don't shoot bombers near teammates
 BOMBER_SAFE_SELF = false -- Don't shoot bombers near self
 BOMBER_SAFE_RADIUS = 10 -- Radius to check for teammates/self
-local BOMBER_VISUALIZE_RADIUS = false -- Show explosion radius visualization
+BOMBER_VISUALIZE_RADIUS = false -- Show explosion radius visualization (global for UI access)
 -- Use weak keys so entries for destroyed bombers are garbage collected
-local BomberRadiusVisuals = setmetatable({}, { __mode = "k" }) -- Store visual parts for bomber radius
+BomberRadiusVisuals = setmetatable({}, { __mode = "k" }) -- Store visual parts for bomber radius (global for UI access)
 local SHOOT_BOMBER_NEAR_TEAMMATES = false -- ONLY shoot bombers when near teammates (opposite behavior)
 local BomberSafetyWhitelist = {} -- array of player names to protect from bomber shots (Don't Shoot Near)
 local ShootBomberNearWhitelist = {} -- array of player names to trigger bomber shots (Shoot Bomber Near)
@@ -3151,9 +3151,10 @@ end
 TARGET_ESP_ENABLED = false -- global for config
 AIM_DOT_ENABLED = false -- Show dot at aim position (global for config)
 
-local activeAimModel = nil
-local activeAimPart = nil
-local activeHighlight = nil -- Highlight instance for target esp
+-- Make these global so they can be accessed from multiple places
+activeAimModel = nil
+activeAimPart = nil
+activeHighlight = nil -- Highlight instance for target esp
 local activeAimDot = nil -- BillboardGui for aim position dot
 local activeAimDotPart = nil -- Invisible part to attach billboard to
 local activeAimDotCurrentPos = nil -- Current interpolated position
