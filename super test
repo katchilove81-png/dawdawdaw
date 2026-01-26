@@ -16392,7 +16392,7 @@ VisualSection:Toggle({
     local antiBreakBonesEnabled = false
     local antiBreakBonesConnection = nil
     local fallStartTime = nil
-    local FALL_DURATION_THRESHOLD = 0.4 -- seconds of falling before activating fly
+    local FALL_DURATION_THRESHOLD = 0.3 -- seconds of falling before activating fly
     local antiBreakBonesCooldown = false -- Prevent rapid toggling
     
     local function startAntiBreakBones()
@@ -16445,15 +16445,15 @@ VisualSection:Toggle({
                                 FlyEnabled = true
                                 startFly()
                                 
-                                -- Wait a brief moment for velocity to reset
-                                task.wait(0.15)
+                                -- Keep fly on for 0.5 seconds to safely break the fall
+                                task.wait(0.5)
                                 
                                 -- Disable fly
                                 FlyEnabled = false
                                 stopFly()
                                 
                                 -- Small cooldown before checking again
-                                task.wait(0.5)
+                                task.wait(0.3)
                                 antiBreakBonesCooldown = false
                             end)
                         end)
