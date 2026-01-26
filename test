@@ -783,9 +783,14 @@ end
 
 -- ===== 5. NEWINDEX HOOK (DETECT PROPERTY CHANGES) =====
 -- Can intercept when anti-cheat tries to modify our properties
+-- Also handles Noclip CFrame blocking for fly bypass
 
 local oldNewIndex
 local newIndexInHook = false
+
+-- Global flags for noclip bypass (accessed from Fly section)
+_G.NoclipBypassEnabled = false
+_G.FlyEnabledForNoclip = false
 
 if hookmetamethod and checkcaller then
     pcall(function()
@@ -811,6 +816,16 @@ if hookmetamethod and checkcaller then
                         if ANTIBAN_DEBUG then warn("[ANTI-BAN] Blocked Anchored = true attempt") end
                         newIndexInHook = false
                         return nil
+                    end
+                    
+                    -- === NOCLIP BYPASS: Block server CFrame teleports ===
+                    if _G.NoclipBypassEnabled and _G.FlyEnabledForNoclip then
+                        local partName = tostring(self)
+                        if (partName == "HumanoidRootPart" or partName == "Torso") and key == "CFrame" then
+                            if ANTIBAN_DEBUG then warn("[ANTI-BAN] Blocked CFrame teleport on " .. partName) end
+                            newIndexInHook = false
+                            return true -- Block the server's CFrame write
+                        end
                     end
                 end
                 
@@ -16851,6 +16866,7 @@ VisualSection:Toggle({
         Default = false,
         Callback = function(state)
             FlyEnabled = state
+            _G.FlyEnabledForNoclip = state -- Sync with anti-ban hook for noclip bypass
             
             if state then
                 startFly()
@@ -16883,53 +16899,11 @@ VisualSection:Toggle({
         end
     })
 
-    -- === Noclip Bypass (Fly Only) with Metatable Hook ===
-    -- Uses __newindex hook to block server CFrame changes (proper bypass)
+    -- === Noclip Bypass (Fly Only) ===
+    -- Uses the anti-ban __newindex hook to block server CFrame changes
+    -- This section just handles CanCollide and sets global flags
     local NoclipEnabled = false
     local noclipConnection = nil
-    local noclipMetatableHooked = false
-    local noclipOriginalNewIndex = nil
-    
-    -- Setup metatable hook for CFrame blocking (only once)
-    local function setupNoclipMetatableHook()
-        if noclipMetatableHooked then return true end
-        
-        -- Check if we have the required functions
-        if not getrawmetatable or not setreadonly or not newcclosure or not checkcaller then
-            return false
-        end
-        
-        local success = pcall(function()
-            local Rm = getrawmetatable(game)
-            noclipOriginalNewIndex = Rm.__newindex
-            setreadonly(Rm, false)
-            
-            Rm.__newindex = newcclosure(function(self, property, value)
-                -- Always allow our own calls
-                if checkcaller() then 
-                    return noclipOriginalNewIndex(self, property, value) 
-                end
-                
-                -- Block CFrame changes to HumanoidRootPart/Torso when noclip + fly enabled
-                if NoclipEnabled and FlyEnabled then
-                    if (tostring(self) == "HumanoidRootPart" or tostring(self) == "Torso") then
-                        if property == "CFrame" and self:IsDescendantOf(LocalPlayer.Character) then
-                            return true -- Block the server's CFrame write
-                        end
-                    end
-                end
-                
-                return noclipOriginalNewIndex(self, property, value)
-            end)
-            
-            setreadonly(Rm, true)
-        end)
-        
-        if success then
-            noclipMetatableHooked = true
-        end
-        return success
-    end
     
     local function startNoclip()
         if noclipConnection then return end -- Already running
@@ -16937,8 +16911,8 @@ VisualSection:Toggle({
         local char = LocalPlayer.Character
         if not char then return end
         
-        -- Setup metatable hook if not already done
-        setupNoclipMetatableHook()
+        -- Enable the noclip bypass in the anti-ban hook
+        _G.NoclipBypassEnabled = true
         
         -- Collision disabling loop
         noclipConnection = RunService.Stepped:Connect(function()
@@ -16963,7 +16937,8 @@ VisualSection:Toggle({
             noclipConnection:Disconnect()
             noclipConnection = nil
         end
-        -- Note: We don't unhook the metatable as it's designed to only block when NoclipEnabled is true
+        -- Disable the noclip bypass in the anti-ban hook
+        _G.NoclipBypassEnabled = false
     end
 
     -- Re-setup on respawn
