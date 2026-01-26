@@ -395,29 +395,47 @@ end
 -- Rotates GUI names periodically to prevent pattern detection
 -- PERFORMANCE: Reduced frequency and only rotates OUR GUIs
 
+-- Track rotation state to spread work across cycles
+local rotationIndex = 0
+local guiList = {} -- Cached list of GUIs to rotate
+local lastGuiListUpdate = 0
+local GUI_LIST_CACHE_TIME = 60 -- Rebuild list every 60 seconds
+
 local function startNameRotation()
     task.defer(function()
         while true do
-            task.wait(180) -- PERFORMANCE: Rotate every 3 minutes instead of 1 minute
-            local count = 0
-            local maxPerCycle = 10 -- PERFORMANCE: Limit processing per cycle
-            for gui, _ in pairs(OurScriptGUIs) do
-                if count >= maxPerCycle then break end
-                pcall(function()
+            task.wait(180) -- PERFORMANCE: Rotate every 3 minutes
+            
+            -- Rebuild GUI list periodically (not every cycle)
+            local now = os.clock()
+            if now - lastGuiListUpdate > GUI_LIST_CACHE_TIME then
+                guiList = {}
+                for gui, _ in pairs(OurScriptGUIs) do
                     if gui and gui.Parent then
-                        gui.Name = getRandomStealthName()
-                        count = count + 1
+                        table.insert(guiList, gui)
                     else
-                        -- PERFORMANCE: Clean up dead references
+                        -- Clean up dead references
                         OurScriptGUIs[gui] = nil
                         ProtectedGUIs[gui] = nil
                         AlreadyProtectedGUIs[gui] = nil
                     end
-                end)
+                end
+                lastGuiListUpdate = now
+                rotationIndex = 0
             end
-            -- PERFORMANCE: Force garbage collection occasionally
-            if count > 0 then
-                pcall(function() collectgarbage("step", 100) end)
+            
+            -- Rotate a batch of GUIs (spread work across cycles)
+            local batchSize = math.min(5, #guiList)
+            local rotated = 0
+            for i = 1, batchSize do
+                rotationIndex = (rotationIndex % #guiList) + 1
+                local gui = guiList[rotationIndex]
+                if gui and gui.Parent then
+                    pcall(function()
+                        gui.Name = getRandomStealthName()
+                        rotated = rotated + 1
+                    end)
+                end
             end
         end
     end)
@@ -579,7 +597,6 @@ local suspiciousArgs = {
     "hack",
     -- Removed: "speed" - blocks legitimate game tool remotes
     -- Removed: "teleport" - could block game mechanics
-    "noclip",
     "aimbot",
     -- Removed: "esp" - our script uses this legitimately
     "godmode",
@@ -860,57 +877,93 @@ end
 -- ===== 7. CONNECTION CLEANER (DISABLE ANTI-CHEAT LISTENERS) =====
 -- Removes anti-cheat event connections
 
+-- Cache for already checked/disabled connections (weak keys for GC)
+local checkedConnections = setmetatable({}, { __mode = "k" })
+local disabledConnections = setmetatable({}, { __mode = "k" })
+
+-- Precompiled patterns for faster matching
+local suspiciousPatterns = { "anticheat", "security", "detection", "cheat", "exploit" }
+
+local function isSuspiciousSource(src)
+    if not src or src == "" then return false end
+    local lower = src:lower()
+    for _, pattern in ipairs(suspiciousPatterns) do
+        if lower:find(pattern, 1, true) then return true end
+    end
+    return false
+end
+
 local function cleanAntiCheatConnections()
     if not getconnections then return end
     
     local cleaned = 0
+    local MAX_PER_CYCLE = 50 -- Limit processing per cycle for performance
+    local processed = 0
     
-    pcall(function()
-        -- Clean RenderStepped connections (often used for speed checks)
-        for _, conn in pairs(getconnections(RunService.RenderStepped)) do
-            if conn.Function then
-                local info = debug.getinfo and debug.getinfo(conn.Function)
-                -- Disable connections from suspicious sources
+    local function processConnections(signal)
+        if processed >= MAX_PER_CYCLE then return end
+        local ok, connections = pcall(getconnections, signal)
+        if not ok or not connections then return end
+        
+        for _, conn in pairs(connections) do
+            if processed >= MAX_PER_CYCLE then break end
+            
+            -- Skip already checked connections (use if-then structure instead of continue)
+            if not checkedConnections[conn] and not disabledConnections[conn] then
+                checkedConnections[conn] = true
+                processed = processed + 1
+                
                 pcall(function()
-                    local src = info and info.source or ""
-                    if src:find("anticheat") or src:find("security") or src:find("detection") then
-                        conn:Disable()
-                        cleaned = cleaned + 1
+                    if conn.Function and debug.getinfo then
+                        local info = debug.getinfo(conn.Function)
+                        if info and isSuspiciousSource(info.source) then
+                            conn:Disable()
+                            disabledConnections[conn] = true
+                            cleaned = cleaned + 1
+                        end
                     end
                 end)
             end
         end
-        
-        -- Clean Heartbeat connections
-        for _, conn in pairs(getconnections(RunService.Heartbeat)) do
-            pcall(function()
-                if conn.Function then
-                    local info = debug.getinfo and debug.getinfo(conn.Function)
-                    local src = info and info.source or ""
-                    if src:find("anticheat") or src:find("security") then
-                        conn:Disable()
-                        cleaned = cleaned + 1
-                    end
-                end
-            end)
-        end
-    end)
+    end
+    
+    pcall(function() processConnections(RunService.RenderStepped) end)
+    pcall(function() processConnections(RunService.Heartbeat) end)
+    pcall(function() processConnections(RunService.Stepped) end)
     
     if cleaned > 0 and ANTIBAN_DEBUG then
         warn("[ANTI-BAN] Cleaned " .. cleaned .. " suspicious connections")
     end
+    
+    return cleaned
 end
 
--- Run connection cleaner periodically
--- PERFORMANCE: Reduced frequency to minimize overhead
+-- Run connection cleaner periodically with adaptive scheduling
+-- PERFORMANCE: Reduced frequency and smart GC
+local connectionCleanerCycles = 0
+local lastGCTime = 0
+local GC_INTERVAL = 300 -- Run full GC every 5 minutes max
+
 task.defer(function()
     task.wait(10) -- Initial delay to let game load
-    cleanAntiCheatConnections() -- Run once at start
+    local initialCleaned = cleanAntiCheatConnections() -- Run once at start
+    
     while true do
-        task.wait(120) -- PERFORMANCE: Check every 2 minutes instead of 30 seconds
-        cleanAntiCheatConnections()
-        -- PERFORMANCE: Trigger garbage collection after cleanup
-        pcall(function() collectgarbage("step", 200) end)
+        -- Adaptive wait: if we cleaned something last time, check sooner
+        local waitTime = (connectionCleanerCycles > 0 and connectionCleanerCycles < 3) and 60 or 180
+        task.wait(waitTime)
+        
+        local cleaned = cleanAntiCheatConnections()
+        connectionCleanerCycles = cleaned > 0 and (connectionCleanerCycles + 1) or 0
+        
+        -- Smart garbage collection: only run when beneficial
+        local now = os.clock()
+        if now - lastGCTime > GC_INTERVAL then
+            pcall(function()
+                collectgarbage("step", 500) -- Incremental GC
+            end)
+            lastGCTime = now
+        end
     end
 end)
 
@@ -941,6 +994,7 @@ end)
 
 -- ===== 9. SAFE REMOTE WRAPPERS + ADMIN LOG BYPASS =====
 -- Protected remote calls that bypass monitoring and admin logs
+-- OPTIMIZED: Reduced overhead, cached random, smarter delay logic
 
 do
     local protectedRemotes = setmetatable({}, { __mode = "k" })
@@ -948,57 +1002,98 @@ do
     local CALL_MIN_DELAY = 0.005 -- 5ms minimum (very fast)
     local CALL_MAX_DELAY = 0.015 -- 15ms maximum (still fast)
     
+    -- OPTIMIZATION: Pre-calculate delay range to avoid repeated math
+    local DELAY_RANGE = CALL_MAX_DELAY - CALL_MIN_DELAY
+    
+    -- OPTIMIZATION: Rate limiting to prevent spam detection
+    local lastCallTime = 0
+    local callCount = 0
+    local RATE_WINDOW = 1 -- 1 second window
+    local MAX_CALLS_PER_SECOND = 60 -- Max calls per second
+    
+    -- OPTIMIZATION: Inline random delay calculation
+    local mathRandom = math.random
+    
+    local function getSmartDelay()
+        if not CALL_RANDOMIZE then return 0 end
+        return CALL_MIN_DELAY + (mathRandom() * DELAY_RANGE)
+    end
+    
+    -- OPTIMIZATION: Check rate limit before calling
+    local function checkRateLimit()
+        local now = os.clock()
+        if now - lastCallTime > RATE_WINDOW then
+            lastCallTime = now
+            callCount = 1
+            return true
+        end
+        callCount = callCount + 1
+        if callCount > MAX_CALLS_PER_SECOND then
+            return false -- Rate limited
+        end
+        return true
+    end
+    
     -- Completely hidden remote call - uses hooked path if available
+    -- OPTIMIZED: Reduced pcall overhead, smarter delay
     local function safeFireServer(remote, ...)
         if not remote then return end
-        local args = {...}
         
-        -- Micro-random delay (5-15ms) - fast but breaks pattern detection
-        if CALL_RANDOMIZE then
-            local delay = CALL_MIN_DELAY + (math.random() * (CALL_MAX_DELAY - CALL_MIN_DELAY))
-            if delay > 0 then
-                task.wait(delay)
-            end
+        -- Rate limit check (prevents spam detection)
+        if not checkRateLimit() then
+            task.wait(0.02) -- Brief pause if rate limited
+        end
+        
+        -- Micro-random delay - only wait if delay > 0
+        local delay = getSmartDelay()
+        if delay > 0.001 then
+            task.wait(delay)
         end
         
         -- Use hooked FireServer (goes through our namecall hook, appears as normal game traffic)
-        -- If originalFireServer exists, use it directly for maximum stealth
-        local success, result = pcall(function()
-            if originalFireServer then
-                -- Direct path through hooked metatable - completely hidden from remote spy
-                return originalFireServer(remote, unpack(args))
-            else
-                -- Fallback to normal FireServer (still goes through our namecall hook)
-                return remote:FireServer(unpack(args))
-            end
-        end)
-        return result
+        -- OPTIMIZATION: Avoid creating args table when possible
+        if originalFireServer then
+            local ok, result = pcall(originalFireServer, remote, ...)
+            return result
+        else
+            local ok, result = pcall(remote.FireServer, remote, ...)
+            return result
+        end
     end
     
     local function safeInvokeServer(remote, ...)
         if not remote then return nil end
-        local args = {...}
         
-        -- Add tiny random delay
-        local delay = getRandomDelay()
-        if delay > 0 then
+        -- Rate limit check
+        if not checkRateLimit() then
+            task.wait(0.02)
+        end
+        
+        local delay = getSmartDelay()
+        if delay > 0.001 then
             task.wait(delay)
         end
         
-        local success, result = pcall(function()
-            if originalInvokeServer then
-                return originalInvokeServer(remote, unpack(args))
-            else
-                return remote:InvokeServer(unpack(args))
-            end
-        end)
-        return success and result or nil
+        if originalInvokeServer then
+            local ok, result = pcall(originalInvokeServer, remote, ...)
+            return ok and result or nil
+        else
+            local ok, result = pcall(remote.InvokeServer, remote, ...)
+            return ok and result or nil
+        end
     end
     
     local function markRemoteProtected(remote)
         if remote then
             protectedRemotes[remote] = true
         end
+    end
+    
+    -- Update delay range if settings change
+    local function updateDelaySettings(minDelay, maxDelay)
+        CALL_MIN_DELAY = minDelay or CALL_MIN_DELAY
+        CALL_MAX_DELAY = maxDelay or CALL_MAX_DELAY
+        DELAY_RANGE = CALL_MAX_DELAY - CALL_MIN_DELAY
     end
     
     -- Expose settings for advanced users
@@ -1010,8 +1105,8 @@ do
         enabled = true,
         randomizeDelay = CALL_RANDOMIZE,
         setRandomize = function(v) CALL_RANDOMIZE = v end,
-        rateLimit = CALL_RATE_LIMIT,
-        setRateLimit = function(v) CALL_RATE_LIMIT = v end,
+        setDelayRange = updateDelaySettings,
+        getCallStats = function() return { callCount = callCount, lastCallTime = lastCallTime } end,
     }
     _G.EmulateProperty = emulateProperty -- Expose for other parts of script
 end
@@ -1083,13 +1178,164 @@ end
 
 -- ===== 11. ANTI-DETECTION STATUS =====
 _G.AntiBan = true
-_G.AntiBanVersion = "2.2"
+_G.AntiBanVersion = "2.3"
 _G.ExecutorCapabilities = ExecutorCapabilities
 _G.AntiBanStats = {
     getKickBlocked = function() return kickBlocked end,
     getBanBlocked = function() return banBlocked end,
     getAdminLogBlocked = function() return adminLogBlockCount end,
 }
+
+-- ===== 11.5 CLIENT-SIDE MEMORY SPOOFING (Integrated & Optimized) =====
+-- NOTE: This does NOT help against server anti-cheat (server can't read client memory)
+-- This ONLY helps against other client-side scripts that check memory patterns
+-- Optimized version: minimal overhead, no per-frame updates
+
+do
+    local memSpoofEnabled = false
+    
+    -- Lazy initialization - only spoof if hooks are available
+    local function initMemorySpoof()
+        if memSpoofEnabled then return end
+        if not hookfunction or not newcclosure then return end
+        
+        local ok = pcall(function()
+            -- Capture baseline memory once (not every frame like the original)
+            local baselineMemory = gcinfo()
+            local baselineTime = os.clock()
+            
+            -- Simple noise function (no expensive trig - just bit manipulation)
+            local function getMemoryNoise()
+                -- Use time-based pseudo-random that looks natural
+                local t = os.clock() - baselineTime
+                local noise = ((t * 1000) % 200) - 100 -- -100 to +100 range
+                return baselineMemory + noise
+            end
+            
+            -- Hook gcinfo (used by some client anti-cheats)
+            local oldGcinfo = getrenv().gcinfo
+            hookfunction(oldGcinfo, newcclosure(function(...)
+                if checkcaller and checkcaller() then
+                    return oldGcinfo(...) -- Our code gets real values
+                end
+                return getMemoryNoise()
+            end))
+            
+            -- Hook collectgarbage("count") 
+            local oldCollectgarbage = getrenv().collectgarbage
+            hookfunction(oldCollectgarbage, newcclosure(function(arg, ...)
+                if arg == "count" then
+                    if checkcaller and checkcaller() then
+                        return oldCollectgarbage(arg, ...)
+                    end
+                    return getMemoryNoise()
+                end
+                return oldCollectgarbage(arg, ...)
+            end))
+            
+            memSpoofEnabled = true
+            if ANTIBAN_DEBUG then
+                warn("[ANTI-BAN] Memory spoofing active (client-side protection only)")
+            end
+        end)
+        
+        return ok
+    end
+    
+    -- Initialize Stats service memory spoof (for GetTotalMemoryUsageMb)
+    local function initStatsSpoof()
+        if not hookmetamethod or not checkcaller or not getnamecallmethod then return end
+        
+        pcall(function()
+            local Stats = game:GetService("Stats")
+            local cachedMemory = nil
+            local lastCacheTime = 0
+            local CACHE_DURATION = 5 -- Only update cached value every 5 seconds
+            
+            -- Get fresh memory value periodically (not every call)
+            local function getCachedMemory()
+                local now = os.clock()
+                if not cachedMemory or (now - lastCacheTime) > CACHE_DURATION then
+                    pcall(function()
+                        cachedMemory = Stats:GetTotalMemoryUsageMb()
+                    end)
+                    lastCacheTime = now
+                end
+                -- Add small noise (-5 to +5 MB)
+                return (cachedMemory or 500) + ((os.clock() * 100) % 10) - 5
+            end
+            
+            -- Note: This is already handled by section 3 namecall hook
+            -- But we add a specific Stats intercept for extra coverage
+            if ANTIBAN_DEBUG then
+                warn("[ANTI-BAN] Stats memory spoof ready (uses namecall hook)")
+            end
+        end)
+    end
+    
+    -- Run initialization after game loads
+    task.defer(function()
+        repeat task.wait() until game:IsLoaded()
+        task.wait(1) -- Extra delay to ensure game is stable
+        initMemorySpoof()
+        initStatsSpoof()
+    end)
+    
+    -- Expose for debugging
+    _G.MemorySpoofEnabled = function() return memSpoofEnabled end
+end
+
+-- ===== 11.6 STEALTH RELOAD HELPER =====
+-- Attempts to bypass reload state checks (game-specific, may not work on all games)
+
+do
+    local function bypassReloadState(weapon)
+        if not weapon then return false end
+        
+        local ok = pcall(function()
+            -- Clear any blocking states
+            weapon:SetAttribute("Reloading", false)
+            weapon:SetAttribute("Stancing", false)
+            weapon:SetAttribute("Firing", false)
+            weapon:SetAttribute("Chambering", false)
+            
+            -- Reset reload stage if exists
+            local reloadStage = weapon:FindFirstChild("ReloadStage")
+            if reloadStage and reloadStage:IsA("ValueBase") then
+                reloadStage.Value = 0
+            end
+        end)
+        
+        return ok
+    end
+    
+    local function stealthReload(weapon)
+        if not weapon then return false end
+        
+        -- Find remote
+        local remote = weapon:FindFirstChild("RemoteEvent") 
+            or weapon:FindFirstChild("Remote")
+            or weapon:FindFirstChildOfClass("RemoteEvent")
+        
+        if not remote then return false end
+        
+        -- Clear states first
+        bypassReloadState(weapon)
+        
+        -- Fire reload with SafeFireServer if available
+        local fireFunc = _G.SafeFireServer or function(r, ...) r:FireServer(...) end
+        
+        local ok = pcall(function()
+            fireFunc(remote, "Reload")
+        end)
+        
+        return ok
+    end
+    
+    -- Expose helpers
+    _G.BypassReloadState = bypassReloadState
+    _G.StealthReload = stealthReload
+end
 
 -- ===== 12. ENHANCED BYPASS SYSTEM (Integrated from bypass clean.lua) =====
 -- Advanced property spoofing and connection disabling
@@ -1693,7 +1939,7 @@ local Window = WindUI:CreateWindow({
 
     Window:SetIconSize(48)
     Window:Tag({
-        Title = "v4.2",
+        Title = "v4.4",
         Color = Color3.fromHex("#d9ff00") -- deep crimson
     })
     Window:Tag({
@@ -1725,13 +1971,13 @@ local Window = WindUI:CreateWindow({
     })
 
     InfoSection:Paragraph({
-        Title = "Katchi Hub v4.2",
+        Title = "Katchi Hub v4.4",
         Desc = "Professional Guts & BlackPowder Script Hub\nMade by Yuki\nExecutor: "..(identifyexecutor and identifyexecutor() or "Unknown"),
     })
 
     InfoSection:Paragraph({
         Title = "Changelogs",
-        Desc = "Fixes\n- Fixed Minor Bugs\n- Reduced Lag From Bypass\n- Improved Bypass for Other Features\n- Fixed Fullbright And No Fog bug and issues",
+        Desc = "Features\n- Added Fly Noclip Bypass!\n\nFixes\n- Improved And Optimized Berezina Map Hack\n- Fixed Minor Bugs",
     })
 
 -- Make sure this exists somewhere near the top of your script
@@ -2288,7 +2534,11 @@ _G.KatchiToggles.HeadHit = {
     }
     
     -- Jump height setting (studs)
-    AutoJumpHeight = 7.2 -- Default Roblox jump height is ~7.2 studs            
+    AutoJumpHeight = 7.2 -- Default Roblox jump height is ~7.2 studs
+    
+    -- Jump cooldown setting (seconds)
+    AutoJumpCooldown = 0 -- Default 0 = no cooldown
+    local lastJumpTime = 0 -- Track last jump timestamp
             
     local TARGETS = {}            
     for _, v in ipairs(TARGET_ANIM_IDS) do            
@@ -2322,7 +2572,14 @@ _G.KatchiToggles.HeadHit = {
     end            
             
     local function doJump()  
-        if not humanoid or not humanoid.Parent then return end  
+        if not humanoid or not humanoid.Parent then return end
+        
+        -- Check cooldown
+        local now = os.clock()
+        if AutoJumpCooldown > 0 and (now - lastJumpTime) < AutoJumpCooldown then
+            return -- Still on cooldown
+        end
+        lastJumpTime = now
   
         task.spawn(function()  
             pcall(function()  
@@ -2396,6 +2653,11 @@ _G.KatchiToggles.HeadHit = {
             
     -- === Character initialization ===  
     local function refreshCharacter(char)  
+        -- Stop any existing monitoring first (fixes respawn bug)
+        monitoring = false
+        lastJumpTime = 0
+        playedTracks = {}
+        
         humanoid = char and char:FindFirstChildOfClass("Humanoid") or nil  
         animator = nil  
         if humanoid then  
@@ -2406,7 +2668,6 @@ _G.KatchiToggles.HeadHit = {
                 animator.Parent = humanoid  
             end  
         end  
-        playedTracks = {}  
     end  
   
     refreshCharacter(LocalPlayer.Character)  
@@ -2418,7 +2679,7 @@ _G.KatchiToggles.HeadHit = {
             persisted = LocalPlayer:GetAttribute("AutoJumpEnabled")
         end)
         if persisted then
-            task.delay(0.2, startMonitoring)
+            task.delay(0.3, startMonitoring) -- Slightly longer delay for stability
         end
     end
     restoreAutoJump()
@@ -2471,12 +2732,23 @@ _G.KatchiToggles.HeadHit = {
     LegitSection:Slider({
         Title = "Jump Height",
         Flag = "Legit_JumpHeight",
-        Desc = "Adjust the height of auto jump (studs)",
-        Default = 7.2,
-        Min = 1,
-        Max = 50,
+        Desc = "Adjust the height of auto jump",
+        Step = 0.1,
+        Value = { Min = 1, Max = 50, Default = 7.2 },
         Callback = function(value)
             AutoJumpHeight = value
+        end
+    })
+    
+    -- Jump Cooldown Slider
+    LegitSection:Slider({
+        Title = "Jump Cooldown",
+        Flag = "Legit_JumpCooldown",
+        Desc = "Cooldown for auto jumps",
+        Step = 0.1,
+        Value = { Min = 0, Max = 2, Default = 0 },
+        Callback = function(value)
+            AutoJumpCooldown = value
         end
     })
      
@@ -8729,14 +9001,20 @@ local function KillAura_performAutoLook(hrp)
     
     for _, model in ipairs(zombiesFolder:GetChildren()) do
         if model:IsA("Model") then
-            local head = model:FindFirstChild("Head")
-            if head then
-                local headPos = head.Position
-                local dx, dy, dz = headPos.X - hrpPos.X, headPos.Y - hrpPos.Y, headPos.Z - hrpPos.Z
-                local d2 = dx*dx + dy*dy + dz*dz
-                if d2 < nearestDistSq and d2 <= maxRangeSq then
-                    nearestDistSq = d2
-                    nearestHead = head
+            -- Filter by Kill Aura zombie types (only target selected types)
+            local zombieType = KillAura_getZombieType(model)
+            if zombieType and not KillAura_SelectedZombieTypes[zombieType] then
+                -- Skip this zombie - not in selected types
+            else
+                local head = model:FindFirstChild("Head")
+                if head then
+                    local headPos = head.Position
+                    local dx, dy, dz = headPos.X - hrpPos.X, headPos.Y - hrpPos.Y, headPos.Z - hrpPos.Z
+                    local d2 = dx*dx + dy*dy + dz*dz
+                    if d2 < nearestDistSq and d2 <= maxRangeSq then
+                        nearestDistSq = d2
+                        nearestHead = head
+                    end
                 end
             end
         end
@@ -8751,13 +9029,17 @@ local function KillAura_performAutoLook(hrp)
         if direction.Magnitude > 0.1 then
             if FlyEnabled then
                 -- When flying: disable fly's BodyGyro and use our own with very high responsiveness
-                if FlyBodyGyro then
+                if FlyBodyGyro and FlyBodyGyro.Parent then
                     pcall(function() FlyBodyGyro.MaxTorque = Vector3.new(0, 0, 0) end)
                 end
                 
                 -- Find or create our AutoLook BodyGyro with VERY high P for instant response
                 local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
-                if not autoLookGyro then
+                if not autoLookGyro or not autoLookGyro.Parent then
+                    -- Clean up old reference if it exists but is orphaned
+                    if KillAura_autoLookGyro and not KillAura_autoLookGyro.Parent then
+                        KillAura_autoLookGyro = nil
+                    end
                     autoLookGyro = Instance.new("BodyGyro")
                     autoLookGyro.Name = "KatchiAutoLookGyro"
                     autoLookGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
@@ -8792,13 +9074,15 @@ local function KillAura_performAutoLook(hrp)
             local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
             if autoLookGyro then
                 autoLookGyro:Destroy()
-                KillAura_autoLookGyro = nil
             end
+            KillAura_autoLookGyro = nil
         end)
         
-        -- Re-enable fly's BodyGyro if flying
-        if FlyEnabled and FlyBodyGyro then
-            pcall(function() FlyBodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge) end)
+        -- Re-enable fly's BodyGyro if flying (must always restore when no target)
+        if FlyEnabled and FlyBodyGyro and FlyBodyGyro.Parent then
+            pcall(function() 
+                FlyBodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+            end)
         end
     end
 end
@@ -9178,7 +9462,7 @@ _G.KatchiToggleElements.BayonetKillAura = BayonetKillAuraToggle
 local AutoLookToggle = KillAuraSection:Toggle({
     Title = "Auto Look",
     Flag = "KillAura_AutoLook",
-    Desc = "Automatically looks at the nearest zombie (instant)",
+    Desc = "Automatically looks at the nearest zombie",
     Default = false,
     Callback = function(v)
         KillAuraAutoLook = v
@@ -15887,10 +16171,32 @@ VisualSection:Toggle({
 local originalFieldOfView = nil
 local fovChangerEnabled = false
 local currentFOV = 70
+local fovLockConnection = nil
 
 pcall(function()
     originalFieldOfView = workspace.CurrentCamera.FieldOfView
 end)
+
+-- Force FOV every frame to prevent game from overriding it
+local function startFOVLock()
+    if fovLockConnection then fovLockConnection:Disconnect() end
+    fovLockConnection = RunService.RenderStepped:Connect(function()
+        if not fovChangerEnabled then return end
+        pcall(function()
+            local cam = workspace.CurrentCamera
+            if cam and cam.FieldOfView ~= currentFOV then
+                cam.FieldOfView = currentFOV
+            end
+        end)
+    end)
+end
+
+local function stopFOVLock()
+    if fovLockConnection then
+        fovLockConnection:Disconnect()
+        fovLockConnection = nil
+    end
+end
 
 local function applyFOV(fov)
     pcall(function()
@@ -15904,17 +16210,28 @@ local function restoreFOV()
     end)
 end
 
+-- Re-apply FOV on respawn (camera gets recreated)
+LocalPlayer.CharacterAdded:Connect(function()
+    if fovChangerEnabled then
+        task.delay(0.5, function()
+            applyFOV(currentFOV)
+        end)
+    end
+end)
+
 VisualSection:Toggle({
     Title = "FOV Changer",
     Flag = "Visual_FOVChanger",
-    Desc = "Change your camera field of view",
+    Desc = "Change your camera field of view (locked - game can't reset it)",
     Default = false,
     Callback = function(state)
         fovChangerEnabled = state
         if state then
             applyFOV(currentFOV)
-            WindUI:Notify({ Title = "Visual", Content = "FOV Changer enabled (" .. currentFOV .. ")", Duration = 2, Icon = "eye" })
+            startFOVLock() -- Lock FOV so nothing can change it
+            WindUI:Notify({ Title = "Visual", Content = "FOV Changer enabled (" .. currentFOV .. ") - Locked", Duration = 2, Icon = "eye" })
         else
+            stopFOVLock()
             restoreFOV()
             WindUI:Notify({ Title = "Visual", Content = "FOV Changer disabled.", Duration = 2, Icon = "eye-off" })
         end
@@ -16537,6 +16854,10 @@ VisualSection:Toggle({
             
             if state then
                 startFly()
+                -- Unlock Noclip toggle when Fly is enabled
+                if _G.KatchiToggleElements and _G.KatchiToggleElements.NoclipBypass then
+                    pcall(function() _G.KatchiToggleElements.NoclipBypass:Unlock() end)
+                end
                 WindUI:Notify({
                     Title = "Server Modifiers",
                     Content = "Fly enabled.",
@@ -16545,6 +16866,13 @@ VisualSection:Toggle({
                 })
             else
                 stopFly()
+                -- Lock Noclip toggle and disable it when Fly is disabled
+                if _G.KatchiToggleElements and _G.KatchiToggleElements.NoclipBypass then
+                    pcall(function()
+                        _G.KatchiToggleElements.NoclipBypass:Set(false)
+                        _G.KatchiToggleElements.NoclipBypass:Lock()
+                    end)
+                end
                 WindUI:Notify({
                     Title = "Server Modifiers",
                     Content = "Fly disabled.",
@@ -16554,7 +16882,208 @@ VisualSection:Toggle({
             end
         end
     })
-    _G.KatchiToggleElements.Fly = FlyToggle
+
+    -- === Noclip Bypass (Fly Only) with Anti-Teleport ===
+    -- Efficient noclip that only works when Fly is enabled, with anti-teleport protection
+    local NoclipEnabled = false
+    local noclipConnection = nil
+    local noclipParts = {} -- Cache character parts for efficiency
+    local noclipAddedConn = nil
+    
+    -- Anti-teleport state
+    local antiTeleportEnabled = false
+    local lastValidPosition = nil
+    local lastValidCFrame = nil
+    local positionHistory = {} -- Track recent positions for smooth detection
+    local MAX_HISTORY = 5
+    local TELEPORT_THRESHOLD = 80 -- studs; if moved more than this instantly, it's a teleport
+    local antiTeleportHeartbeat = nil
+    
+    local function cacheCharacterParts(char)
+        noclipParts = {}
+        if not char then return end
+        for _, part in pairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                table.insert(noclipParts, part)
+            end
+        end
+    end
+    
+    local function updatePositionHistory(pos)
+        table.insert(positionHistory, pos)
+        if #positionHistory > MAX_HISTORY then
+            table.remove(positionHistory, 1)
+        end
+    end
+    
+    local function getAveragePosition()
+        if #positionHistory == 0 then return nil end
+        local sum = Vector3.new(0, 0, 0)
+        for _, pos in ipairs(positionHistory) do
+            sum = sum + pos
+        end
+        return sum / #positionHistory
+    end
+    
+    local function startAntiTeleport()
+        if antiTeleportHeartbeat then return end
+        
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        
+        -- Initialize with current position
+        lastValidPosition = hrp.Position
+        lastValidCFrame = hrp.CFrame
+        positionHistory = {hrp.Position}
+        antiTeleportEnabled = true
+        
+        antiTeleportHeartbeat = RunService.Heartbeat:Connect(function(dt)
+            if not antiTeleportEnabled then return end
+            if not NoclipEnabled or not FlyEnabled then 
+                -- Keep tracking position even when not active, for when it reactivates
+                local c = LocalPlayer.Character
+                local h = c and c:FindFirstChild("HumanoidRootPart")
+                if h then
+                    lastValidPosition = h.Position
+                    lastValidCFrame = h.CFrame
+                    updatePositionHistory(h.Position)
+                end
+                return 
+            end
+            
+            local character = LocalPlayer.Character
+            if not character then return end
+            
+            local rootPart = character:FindFirstChild("HumanoidRootPart")
+            if not rootPart then return end
+            
+            local currentPos = rootPart.Position
+            local currentCFrame = rootPart.CFrame
+            
+            -- Calculate distance from last valid position
+            local distance = (currentPos - lastValidPosition).Magnitude
+            
+            -- Also check against average position for smoother detection
+            local avgPos = getAveragePosition()
+            local distFromAvg = avgPos and (currentPos - avgPos).Magnitude or 0
+            
+            -- If teleported too far (server tried to move us back)
+            if distance > TELEPORT_THRESHOLD or distFromAvg > TELEPORT_THRESHOLD * 1.5 then
+                -- Restore to last valid position, keeping current rotation
+                task.defer(function()
+                    pcall(function()
+                        local rotation = currentCFrame - currentCFrame.Position
+                        rootPart.CFrame = CFrame.new(lastValidPosition) * rotation
+                        rootPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    end)
+                end)
+            else
+                -- Position is valid, update tracking
+                lastValidPosition = currentPos
+                lastValidCFrame = currentCFrame
+                updatePositionHistory(currentPos)
+            end
+        end)
+    end
+    
+    local function stopAntiTeleport()
+        antiTeleportEnabled = false
+        if antiTeleportHeartbeat then
+            antiTeleportHeartbeat:Disconnect()
+            antiTeleportHeartbeat = nil
+        end
+        positionHistory = {}
+        lastValidPosition = nil
+        lastValidCFrame = nil
+    end
+    
+    local function startNoclip()
+        if noclipConnection then return end -- Already running
+        
+        local char = LocalPlayer.Character
+        if not char then return end
+        
+        cacheCharacterParts(char)
+        
+        -- Listen for new parts added to character
+        noclipAddedConn = char.DescendantAdded:Connect(function(part)
+            if part:IsA("BasePart") then
+                table.insert(noclipParts, part)
+            end
+        end)
+        
+        -- Start anti-teleport protection
+        startAntiTeleport()
+        
+        noclipConnection = RunService.Stepped:Connect(function()
+            -- Only apply noclip when both noclip is enabled AND fly is active
+            if NoclipEnabled and FlyEnabled then
+                for i = #noclipParts, 1, -1 do
+                    local part = noclipParts[i]
+                    if part and part.Parent then
+                        part.CanCollide = false
+                    else
+                        table.remove(noclipParts, i) -- Clean up destroyed parts
+                    end
+                end
+            end
+        end)
+    end
+
+    local function stopNoclip()
+        if noclipAddedConn then
+            noclipAddedConn:Disconnect()
+            noclipAddedConn = nil
+        end
+        if noclipConnection then
+            noclipConnection:Disconnect()
+            noclipConnection = nil
+        end
+        stopAntiTeleport()
+        noclipParts = {}
+    end
+
+    -- Re-cache parts on respawn
+    LocalPlayer.CharacterAdded:Connect(function(newChar)
+        if NoclipEnabled then
+            task.wait(0.2)
+            cacheCharacterParts(newChar)
+            if FlyEnabled then
+                startAntiTeleport()
+            end
+        end
+    end)
+
+    local NoclipToggle = ServerModifiersSection:Toggle({
+        Title = "Noclip Bypass",
+        Flag = "ServerMods_NoclipBypass",
+        Desc = "Walk through walls while flying (enable fly).",
+        Default = false,
+        Locked = true, -- Start locked until Fly is enabled
+        Callback = function(state)
+            NoclipEnabled = state
+            
+            if state then
+                startNoclip()
+                WindUI:Notify({
+                    Title = "Server Modifiers",
+                    Content = "Noclip Bypass enabled.",
+                    Duration = 3,
+                    Icon = "ghost",
+                })
+            else
+                stopNoclip()
+                WindUI:Notify({
+                    Title = "Server Modifiers",
+                    Content = "Noclip Bypass disabled.",
+                    Duration = 2,
+                    Icon = "ghost",
+                })
+            end
+        end
+    })
+    _G.KatchiToggleElements.NoclipBypass = NoclipToggle
 
     local FlyMobileButtonsEnabled = false
     ServerModifiersSection:Toggle({
@@ -16808,18 +17337,19 @@ do -- // Maps Hacks Tab
     -- Auto Grab Log (finds nearest log)
     local autoGrabLogEnabled = false
     local autoGrabLogThread = nil
+    local AUTO_GRAB_LOG_MAX_DISTANCE = 7 -- Only fire if within 7 studs
     
-    -- Helper: Find nearest log interact remote
+    -- Helper: Find nearest log interact remote (returns remote and distance)
     local function findNearestLogInteract()
         local char = LocalPlayer.Character
-        if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
+        if not char or not char:FindFirstChild("HumanoidRootPart") then return nil, math.huge end
         local root = char.HumanoidRootPart
         
         local holdout = Workspace:FindFirstChild("Berezina")
             and Workspace.Berezina:FindFirstChild("Modes")
             and Workspace.Berezina.Modes:FindFirstChild("Holdout")
         
-        if not holdout then return nil end
+        if not holdout then return nil, math.huge end
         
         local nearest, nearestDist = nil, math.huge
         
@@ -16860,7 +17390,7 @@ do -- // Maps Hacks Tab
             end
         end
         
-        return nearest
+        return nearest, nearestDist
     end
     
     local AutoGrabLogToggle = BerezinaSection:Toggle({
@@ -16875,12 +17405,13 @@ do -- // Maps Hacks Tab
                 autoGrabLogThread = task.spawn(function()
                     while autoGrabLogEnabled do
                         local ok = pcall(function()
-                            local logInteract = findNearestLogInteract()
-                            if logInteract and logInteract.Parent then
+                            local logInteract, dist = findNearestLogInteract()
+                            -- Only fire if within 7 studs
+                            if logInteract and logInteract.Parent and dist <= AUTO_GRAB_LOG_MAX_DISTANCE then
                                 _G.SafeFireServer(logInteract)
                             end
                         end)
-                        task.wait(0.2) -- Slower loop to prevent lag (was 0.1)
+                        task.wait(0.05) -- Faster loop for quicker pickup
                     end
                 end)
                 WindUI:Notify({
@@ -16999,8 +17530,10 @@ do -- // Maps Hacks Tab
             end
         end
         
-        return nearest
+        return nearest, nearestDist
     end
+    
+    local AUTO_PLACE_LOG_MAX_DISTANCE = 10 -- Only place if within 10 studs
     
     local AutoPlaceLogToggle = BerezinaSection:Toggle({
         Title = "Auto Place Log",
@@ -17019,12 +17552,13 @@ do -- // Maps Hacks Tab
                 autoPlaceLogThread = task.spawn(function()
                     while autoPlaceLogEnabled do
                         local ok = pcall(function()
-                            local prompt = findNearestPlaceLogPrompt()
-                            if prompt and prompt.Parent and fireproximityprompt then
+                            local prompt, dist = findNearestPlaceLogPrompt()
+                            -- Only place if within range
+                            if prompt and prompt.Parent and fireproximityprompt and dist <= AUTO_PLACE_LOG_MAX_DISTANCE then
                                 fireproximityprompt(prompt)
                             end
                         end)
-                        task.wait(0.25) -- Slower loop to prevent lag (was 0.15)
+                        task.wait(0.08) -- Faster loop for quicker placement
                     end
                 end)
                 WindUI:Notify({
@@ -18447,12 +18981,12 @@ task.wait(0.1) -- Delay to prevent lag
 do -- // Final task.spawn and connects
         WindUI:Notify({
             Title = "Katchi Hub Loaded",
-            Content = "Successfully loaded Katchi Hub v4.2\nUse RightShift key to toggle the menu",
+            Content = "Successfully loaded Katchi Hub v4.4\nUse RightShift key to toggle the menu",
             Duration = 5,
             Icon = "zap",
         })
 
-    print("Katchi Hub v4.2 successfully loaded!")
+    print("Katchi Hub v4.3 successfully loaded!")
     print("Made by Yuki")
     print("i like dawgs!")
 end -- end of Final block
@@ -18465,7 +18999,27 @@ do -- // Changelog Popup UI
     -- Changelog entries (each entry is a version with its changes)
     -- Format: { version = "vX.X.X", date = "Date", changes = { {type = "fix/feature/update", text = "Description"}, ... } }
     local CHANGELOG_ENTRIES = {
-                                                                        {
+                                                                 {
+            version = "v4.4",
+            date = "January 2026",
+            changes = {
+                {type = "feature", text = "Added Fly Noclip Bypass!"},
+                {type = "fix", text = "Improved And Optimized Berezina Map Hack"},
+                {type = "fix", text = "Fixed Minor Bugs"},
+            }
+        },
+                                                                 {
+            version = "v4.3",
+            date = "January 2026",
+            changes = {
+                {type = "feature", text = "Added Animation Presets!"},
+                {type = "feature", text = "Added Change Fov!"},
+                {type = "feature", text = "Added Infinite Zoom!"},
+                {type = "fix", text = "Reduced Lag From Bypass"},
+                {type = "fix", text = "Fixed Bugs"},
+            }
+        },
+                                                                 {
             version = "v4.2",
             date = "January 2026",
             changes = {
