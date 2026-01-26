@@ -395,29 +395,47 @@ end
 -- Rotates GUI names periodically to prevent pattern detection
 -- PERFORMANCE: Reduced frequency and only rotates OUR GUIs
 
+-- Track rotation state to spread work across cycles
+local rotationIndex = 0
+local guiList = {} -- Cached list of GUIs to rotate
+local lastGuiListUpdate = 0
+local GUI_LIST_CACHE_TIME = 60 -- Rebuild list every 60 seconds
+
 local function startNameRotation()
     task.defer(function()
         while true do
-            task.wait(180) -- PERFORMANCE: Rotate every 3 minutes instead of 1 minute
-            local count = 0
-            local maxPerCycle = 10 -- PERFORMANCE: Limit processing per cycle
-            for gui, _ in pairs(OurScriptGUIs) do
-                if count >= maxPerCycle then break end
-                pcall(function()
+            task.wait(180) -- PERFORMANCE: Rotate every 3 minutes
+            
+            -- Rebuild GUI list periodically (not every cycle)
+            local now = os.clock()
+            if now - lastGuiListUpdate > GUI_LIST_CACHE_TIME then
+                guiList = {}
+                for gui, _ in pairs(OurScriptGUIs) do
                     if gui and gui.Parent then
-                        gui.Name = getRandomStealthName()
-                        count = count + 1
+                        table.insert(guiList, gui)
                     else
-                        -- PERFORMANCE: Clean up dead references
+                        -- Clean up dead references
                         OurScriptGUIs[gui] = nil
                         ProtectedGUIs[gui] = nil
                         AlreadyProtectedGUIs[gui] = nil
                     end
-                end)
+                end
+                lastGuiListUpdate = now
+                rotationIndex = 0
             end
-            -- PERFORMANCE: Force garbage collection occasionally
-            if count > 0 then
-                pcall(function() collectgarbage("step", 100) end)
+            
+            -- Rotate a batch of GUIs (spread work across cycles)
+            local batchSize = math.min(5, #guiList)
+            local rotated = 0
+            for i = 1, batchSize do
+                rotationIndex = (rotationIndex % #guiList) + 1
+                local gui = guiList[rotationIndex]
+                if gui and gui.Parent then
+                    pcall(function()
+                        gui.Name = getRandomStealthName()
+                        rotated = rotated + 1
+                    end)
+                end
             end
         end
     end)
@@ -579,7 +597,6 @@ local suspiciousArgs = {
     "hack",
     -- Removed: "speed" - blocks legitimate game tool remotes
     -- Removed: "teleport" - could block game mechanics
-    "noclip",
     "aimbot",
     -- Removed: "esp" - our script uses this legitimately
     "godmode",
@@ -860,57 +877,93 @@ end
 -- ===== 7. CONNECTION CLEANER (DISABLE ANTI-CHEAT LISTENERS) =====
 -- Removes anti-cheat event connections
 
+-- Cache for already checked/disabled connections (weak keys for GC)
+local checkedConnections = setmetatable({}, { __mode = "k" })
+local disabledConnections = setmetatable({}, { __mode = "k" })
+
+-- Precompiled patterns for faster matching
+local suspiciousPatterns = { "anticheat", "security", "detection", "cheat", "exploit" }
+
+local function isSuspiciousSource(src)
+    if not src or src == "" then return false end
+    local lower = src:lower()
+    for _, pattern in ipairs(suspiciousPatterns) do
+        if lower:find(pattern, 1, true) then return true end
+    end
+    return false
+end
+
 local function cleanAntiCheatConnections()
     if not getconnections then return end
     
     local cleaned = 0
+    local MAX_PER_CYCLE = 50 -- Limit processing per cycle for performance
+    local processed = 0
     
-    pcall(function()
-        -- Clean RenderStepped connections (often used for speed checks)
-        for _, conn in pairs(getconnections(RunService.RenderStepped)) do
-            if conn.Function then
-                local info = debug.getinfo and debug.getinfo(conn.Function)
-                -- Disable connections from suspicious sources
+    local function processConnections(signal)
+        if processed >= MAX_PER_CYCLE then return end
+        local ok, connections = pcall(getconnections, signal)
+        if not ok or not connections then return end
+        
+        for _, conn in pairs(connections) do
+            if processed >= MAX_PER_CYCLE then break end
+            
+            -- Skip already checked connections (use if-then structure instead of continue)
+            if not checkedConnections[conn] and not disabledConnections[conn] then
+                checkedConnections[conn] = true
+                processed = processed + 1
+                
                 pcall(function()
-                    local src = info and info.source or ""
-                    if src:find("anticheat") or src:find("security") or src:find("detection") then
-                        conn:Disable()
-                        cleaned = cleaned + 1
+                    if conn.Function and debug.getinfo then
+                        local info = debug.getinfo(conn.Function)
+                        if info and isSuspiciousSource(info.source) then
+                            conn:Disable()
+                            disabledConnections[conn] = true
+                            cleaned = cleaned + 1
+                        end
                     end
                 end)
             end
         end
-        
-        -- Clean Heartbeat connections
-        for _, conn in pairs(getconnections(RunService.Heartbeat)) do
-            pcall(function()
-                if conn.Function then
-                    local info = debug.getinfo and debug.getinfo(conn.Function)
-                    local src = info and info.source or ""
-                    if src:find("anticheat") or src:find("security") then
-                        conn:Disable()
-                        cleaned = cleaned + 1
-                    end
-                end
-            end)
-        end
-    end)
+    end
+    
+    pcall(function() processConnections(RunService.RenderStepped) end)
+    pcall(function() processConnections(RunService.Heartbeat) end)
+    pcall(function() processConnections(RunService.Stepped) end)
     
     if cleaned > 0 and ANTIBAN_DEBUG then
         warn("[ANTI-BAN] Cleaned " .. cleaned .. " suspicious connections")
     end
+    
+    return cleaned
 end
 
--- Run connection cleaner periodically
--- PERFORMANCE: Reduced frequency to minimize overhead
+-- Run connection cleaner periodically with adaptive scheduling
+-- PERFORMANCE: Reduced frequency and smart GC
+local connectionCleanerCycles = 0
+local lastGCTime = 0
+local GC_INTERVAL = 300 -- Run full GC every 5 minutes max
+
 task.defer(function()
     task.wait(10) -- Initial delay to let game load
-    cleanAntiCheatConnections() -- Run once at start
+    local initialCleaned = cleanAntiCheatConnections() -- Run once at start
+    
     while true do
-        task.wait(120) -- PERFORMANCE: Check every 2 minutes instead of 30 seconds
-        cleanAntiCheatConnections()
-        -- PERFORMANCE: Trigger garbage collection after cleanup
-        pcall(function() collectgarbage("step", 200) end)
+        -- Adaptive wait: if we cleaned something last time, check sooner
+        local waitTime = (connectionCleanerCycles > 0 and connectionCleanerCycles < 3) and 60 or 180
+        task.wait(waitTime)
+        
+        local cleaned = cleanAntiCheatConnections()
+        connectionCleanerCycles = cleaned > 0 and (connectionCleanerCycles + 1) or 0
+        
+        -- Smart garbage collection: only run when beneficial
+        local now = os.clock()
+        if now - lastGCTime > GC_INTERVAL then
+            pcall(function()
+                collectgarbage("step", 500) -- Incremental GC
+            end)
+            lastGCTime = now
+        end
     end
 end)
 
@@ -941,6 +994,7 @@ end)
 
 -- ===== 9. SAFE REMOTE WRAPPERS + ADMIN LOG BYPASS =====
 -- Protected remote calls that bypass monitoring and admin logs
+-- OPTIMIZED: Reduced overhead, cached random, smarter delay logic
 
 do
     local protectedRemotes = setmetatable({}, { __mode = "k" })
@@ -948,57 +1002,98 @@ do
     local CALL_MIN_DELAY = 0.005 -- 5ms minimum (very fast)
     local CALL_MAX_DELAY = 0.015 -- 15ms maximum (still fast)
     
+    -- OPTIMIZATION: Pre-calculate delay range to avoid repeated math
+    local DELAY_RANGE = CALL_MAX_DELAY - CALL_MIN_DELAY
+    
+    -- OPTIMIZATION: Rate limiting to prevent spam detection
+    local lastCallTime = 0
+    local callCount = 0
+    local RATE_WINDOW = 1 -- 1 second window
+    local MAX_CALLS_PER_SECOND = 60 -- Max calls per second
+    
+    -- OPTIMIZATION: Inline random delay calculation
+    local mathRandom = math.random
+    
+    local function getSmartDelay()
+        if not CALL_RANDOMIZE then return 0 end
+        return CALL_MIN_DELAY + (mathRandom() * DELAY_RANGE)
+    end
+    
+    -- OPTIMIZATION: Check rate limit before calling
+    local function checkRateLimit()
+        local now = os.clock()
+        if now - lastCallTime > RATE_WINDOW then
+            lastCallTime = now
+            callCount = 1
+            return true
+        end
+        callCount = callCount + 1
+        if callCount > MAX_CALLS_PER_SECOND then
+            return false -- Rate limited
+        end
+        return true
+    end
+    
     -- Completely hidden remote call - uses hooked path if available
+    -- OPTIMIZED: Reduced pcall overhead, smarter delay
     local function safeFireServer(remote, ...)
         if not remote then return end
-        local args = {...}
         
-        -- Micro-random delay (5-15ms) - fast but breaks pattern detection
-        if CALL_RANDOMIZE then
-            local delay = CALL_MIN_DELAY + (math.random() * (CALL_MAX_DELAY - CALL_MIN_DELAY))
-            if delay > 0 then
-                task.wait(delay)
-            end
+        -- Rate limit check (prevents spam detection)
+        if not checkRateLimit() then
+            task.wait(0.02) -- Brief pause if rate limited
+        end
+        
+        -- Micro-random delay - only wait if delay > 0
+        local delay = getSmartDelay()
+        if delay > 0.001 then
+            task.wait(delay)
         end
         
         -- Use hooked FireServer (goes through our namecall hook, appears as normal game traffic)
-        -- If originalFireServer exists, use it directly for maximum stealth
-        local success, result = pcall(function()
-            if originalFireServer then
-                -- Direct path through hooked metatable - completely hidden from remote spy
-                return originalFireServer(remote, unpack(args))
-            else
-                -- Fallback to normal FireServer (still goes through our namecall hook)
-                return remote:FireServer(unpack(args))
-            end
-        end)
-        return result
+        -- OPTIMIZATION: Avoid creating args table when possible
+        if originalFireServer then
+            local ok, result = pcall(originalFireServer, remote, ...)
+            return result
+        else
+            local ok, result = pcall(remote.FireServer, remote, ...)
+            return result
+        end
     end
     
     local function safeInvokeServer(remote, ...)
         if not remote then return nil end
-        local args = {...}
         
-        -- Add tiny random delay
-        local delay = getRandomDelay()
-        if delay > 0 then
+        -- Rate limit check
+        if not checkRateLimit() then
+            task.wait(0.02)
+        end
+        
+        local delay = getSmartDelay()
+        if delay > 0.001 then
             task.wait(delay)
         end
         
-        local success, result = pcall(function()
-            if originalInvokeServer then
-                return originalInvokeServer(remote, unpack(args))
-            else
-                return remote:InvokeServer(unpack(args))
-            end
-        end)
-        return success and result or nil
+        if originalInvokeServer then
+            local ok, result = pcall(originalInvokeServer, remote, ...)
+            return ok and result or nil
+        else
+            local ok, result = pcall(remote.InvokeServer, remote, ...)
+            return ok and result or nil
+        end
     end
     
     local function markRemoteProtected(remote)
         if remote then
             protectedRemotes[remote] = true
         end
+    end
+    
+    -- Update delay range if settings change
+    local function updateDelaySettings(minDelay, maxDelay)
+        CALL_MIN_DELAY = minDelay or CALL_MIN_DELAY
+        CALL_MAX_DELAY = maxDelay or CALL_MAX_DELAY
+        DELAY_RANGE = CALL_MAX_DELAY - CALL_MIN_DELAY
     end
     
     -- Expose settings for advanced users
@@ -1010,8 +1105,8 @@ do
         enabled = true,
         randomizeDelay = CALL_RANDOMIZE,
         setRandomize = function(v) CALL_RANDOMIZE = v end,
-        rateLimit = CALL_RATE_LIMIT,
-        setRateLimit = function(v) CALL_RATE_LIMIT = v end,
+        setDelayRange = updateDelaySettings,
+        getCallStats = function() return { callCount = callCount, lastCallTime = lastCallTime } end,
     }
     _G.EmulateProperty = emulateProperty -- Expose for other parts of script
 end
@@ -1083,13 +1178,164 @@ end
 
 -- ===== 11. ANTI-DETECTION STATUS =====
 _G.AntiBan = true
-_G.AntiBanVersion = "2.2"
+_G.AntiBanVersion = "2.3"
 _G.ExecutorCapabilities = ExecutorCapabilities
 _G.AntiBanStats = {
     getKickBlocked = function() return kickBlocked end,
     getBanBlocked = function() return banBlocked end,
     getAdminLogBlocked = function() return adminLogBlockCount end,
 }
+
+-- ===== 11.5 CLIENT-SIDE MEMORY SPOOFING (Integrated & Optimized) =====
+-- NOTE: This does NOT help against server anti-cheat (server can't read client memory)
+-- This ONLY helps against other client-side scripts that check memory patterns
+-- Optimized version: minimal overhead, no per-frame updates
+
+do
+    local memSpoofEnabled = false
+    
+    -- Lazy initialization - only spoof if hooks are available
+    local function initMemorySpoof()
+        if memSpoofEnabled then return end
+        if not hookfunction or not newcclosure then return end
+        
+        local ok = pcall(function()
+            -- Capture baseline memory once (not every frame like the original)
+            local baselineMemory = gcinfo()
+            local baselineTime = os.clock()
+            
+            -- Simple noise function (no expensive trig - just bit manipulation)
+            local function getMemoryNoise()
+                -- Use time-based pseudo-random that looks natural
+                local t = os.clock() - baselineTime
+                local noise = ((t * 1000) % 200) - 100 -- -100 to +100 range
+                return baselineMemory + noise
+            end
+            
+            -- Hook gcinfo (used by some client anti-cheats)
+            local oldGcinfo = getrenv().gcinfo
+            hookfunction(oldGcinfo, newcclosure(function(...)
+                if checkcaller and checkcaller() then
+                    return oldGcinfo(...) -- Our code gets real values
+                end
+                return getMemoryNoise()
+            end))
+            
+            -- Hook collectgarbage("count") 
+            local oldCollectgarbage = getrenv().collectgarbage
+            hookfunction(oldCollectgarbage, newcclosure(function(arg, ...)
+                if arg == "count" then
+                    if checkcaller and checkcaller() then
+                        return oldCollectgarbage(arg, ...)
+                    end
+                    return getMemoryNoise()
+                end
+                return oldCollectgarbage(arg, ...)
+            end))
+            
+            memSpoofEnabled = true
+            if ANTIBAN_DEBUG then
+                warn("[ANTI-BAN] Memory spoofing active (client-side protection only)")
+            end
+        end)
+        
+        return ok
+    end
+    
+    -- Initialize Stats service memory spoof (for GetTotalMemoryUsageMb)
+    local function initStatsSpoof()
+        if not hookmetamethod or not checkcaller or not getnamecallmethod then return end
+        
+        pcall(function()
+            local Stats = game:GetService("Stats")
+            local cachedMemory = nil
+            local lastCacheTime = 0
+            local CACHE_DURATION = 5 -- Only update cached value every 5 seconds
+            
+            -- Get fresh memory value periodically (not every call)
+            local function getCachedMemory()
+                local now = os.clock()
+                if not cachedMemory or (now - lastCacheTime) > CACHE_DURATION then
+                    pcall(function()
+                        cachedMemory = Stats:GetTotalMemoryUsageMb()
+                    end)
+                    lastCacheTime = now
+                end
+                -- Add small noise (-5 to +5 MB)
+                return (cachedMemory or 500) + ((os.clock() * 100) % 10) - 5
+            end
+            
+            -- Note: This is already handled by section 3 namecall hook
+            -- But we add a specific Stats intercept for extra coverage
+            if ANTIBAN_DEBUG then
+                warn("[ANTI-BAN] Stats memory spoof ready (uses namecall hook)")
+            end
+        end)
+    end
+    
+    -- Run initialization after game loads
+    task.defer(function()
+        repeat task.wait() until game:IsLoaded()
+        task.wait(1) -- Extra delay to ensure game is stable
+        initMemorySpoof()
+        initStatsSpoof()
+    end)
+    
+    -- Expose for debugging
+    _G.MemorySpoofEnabled = function() return memSpoofEnabled end
+end
+
+-- ===== 11.6 STEALTH RELOAD HELPER =====
+-- Attempts to bypass reload state checks (game-specific, may not work on all games)
+
+do
+    local function bypassReloadState(weapon)
+        if not weapon then return false end
+        
+        local ok = pcall(function()
+            -- Clear any blocking states
+            weapon:SetAttribute("Reloading", false)
+            weapon:SetAttribute("Stancing", false)
+            weapon:SetAttribute("Firing", false)
+            weapon:SetAttribute("Chambering", false)
+            
+            -- Reset reload stage if exists
+            local reloadStage = weapon:FindFirstChild("ReloadStage")
+            if reloadStage and reloadStage:IsA("ValueBase") then
+                reloadStage.Value = 0
+            end
+        end)
+        
+        return ok
+    end
+    
+    local function stealthReload(weapon)
+        if not weapon then return false end
+        
+        -- Find remote
+        local remote = weapon:FindFirstChild("RemoteEvent") 
+            or weapon:FindFirstChild("Remote")
+            or weapon:FindFirstChildOfClass("RemoteEvent")
+        
+        if not remote then return false end
+        
+        -- Clear states first
+        bypassReloadState(weapon)
+        
+        -- Fire reload with SafeFireServer if available
+        local fireFunc = _G.SafeFireServer or function(r, ...) r:FireServer(...) end
+        
+        local ok = pcall(function()
+            fireFunc(remote, "Reload")
+        end)
+        
+        return ok
+    end
+    
+    -- Expose helpers
+    _G.BypassReloadState = bypassReloadState
+    _G.StealthReload = stealthReload
+end
 
 -- ===== 12. ENHANCED BYPASS SYSTEM (Integrated from bypass clean.lua) =====
 -- Advanced property spoofing and connection disabling
@@ -1693,7 +1939,7 @@ local Window = WindUI:CreateWindow({
 
     Window:SetIconSize(48)
     Window:Tag({
-        Title = "v4.2",
+        Title = "v4.3",
         Color = Color3.fromHex("#d9ff00") -- deep crimson
     })
     Window:Tag({
@@ -1725,13 +1971,13 @@ local Window = WindUI:CreateWindow({
     })
 
     InfoSection:Paragraph({
-        Title = "Katchi Hub v4.2",
+        Title = "Katchi Hub v4.3",
         Desc = "Professional Guts & BlackPowder Script Hub\nMade by Yuki\nExecutor: "..(identifyexecutor and identifyexecutor() or "Unknown"),
     })
 
     InfoSection:Paragraph({
         Title = "Changelogs",
-        Desc = "Fixes\n- Fixed Minor Bugs\n- Reduced Lag From Bypass\n- Improved Bypass for Other Features\n- Fixed Fullbright And No Fog bug and issues",
+        Desc = "Features\n- Added Animation Presets!\n- Added Change Fov!\n- Added Infinite Zoom!\n\nFixes\n- Reduced Lag From Bypass\n- Fixed Minor Bugs",
     })
 
 -- Make sure this exists somewhere near the top of your script
@@ -2288,7 +2534,11 @@ _G.KatchiToggles.HeadHit = {
     }
     
     -- Jump height setting (studs)
-    AutoJumpHeight = 7.2 -- Default Roblox jump height is ~7.2 studs            
+    AutoJumpHeight = 7.2 -- Default Roblox jump height is ~7.2 studs
+    
+    -- Jump cooldown setting (seconds)
+    AutoJumpCooldown = 0 -- Default 0 = no cooldown
+    local lastJumpTime = 0 -- Track last jump timestamp
             
     local TARGETS = {}            
     for _, v in ipairs(TARGET_ANIM_IDS) do            
@@ -2322,7 +2572,14 @@ _G.KatchiToggles.HeadHit = {
     end            
             
     local function doJump()  
-        if not humanoid or not humanoid.Parent then return end  
+        if not humanoid or not humanoid.Parent then return end
+        
+        -- Check cooldown
+        local now = os.clock()
+        if AutoJumpCooldown > 0 and (now - lastJumpTime) < AutoJumpCooldown then
+            return -- Still on cooldown
+        end
+        lastJumpTime = now
   
         task.spawn(function()  
             pcall(function()  
@@ -2396,6 +2653,11 @@ _G.KatchiToggles.HeadHit = {
             
     -- === Character initialization ===  
     local function refreshCharacter(char)  
+        -- Stop any existing monitoring first (fixes respawn bug)
+        monitoring = false
+        lastJumpTime = 0
+        playedTracks = {}
+        
         humanoid = char and char:FindFirstChildOfClass("Humanoid") or nil  
         animator = nil  
         if humanoid then  
@@ -2406,7 +2668,6 @@ _G.KatchiToggles.HeadHit = {
                 animator.Parent = humanoid  
             end  
         end  
-        playedTracks = {}  
     end  
   
     refreshCharacter(LocalPlayer.Character)  
@@ -2418,7 +2679,7 @@ _G.KatchiToggles.HeadHit = {
             persisted = LocalPlayer:GetAttribute("AutoJumpEnabled")
         end)
         if persisted then
-            task.delay(0.2, startMonitoring)
+            task.delay(0.3, startMonitoring) -- Slightly longer delay for stability
         end
     end
     restoreAutoJump()
@@ -2471,12 +2732,23 @@ _G.KatchiToggles.HeadHit = {
     LegitSection:Slider({
         Title = "Jump Height",
         Flag = "Legit_JumpHeight",
-        Desc = "Adjust the height of auto jump (studs)",
-        Default = 7.2,
-        Min = 1,
-        Max = 50,
+        Desc = "Adjust the height of auto jump",
+        Step = 0.1,
+        Value = { Min = 1, Max = 50, Default = 7.2 },
         Callback = function(value)
             AutoJumpHeight = value
+        end
+    })
+    
+    -- Jump Cooldown Slider
+    LegitSection:Slider({
+        Title = "Jump Cooldown",
+        Flag = "Legit_JumpCooldown",
+        Desc = "Cooldown for auto jumps",
+        Step = 0.1,
+        Value = { Min = 0, Max = 2, Default = 0 },
+        Callback = function(value)
+            AutoJumpCooldown = value
         end
     })
      
@@ -8678,19 +8950,38 @@ local function KillAura_performKillAura(hrp)
 end
 
 -- Separate Auto Look function that finds the nearest zombie independently
-local function KillAura_performAutoLook(hrp)
-    if not KillAuraAutoLook then
-        -- Clean up BodyGyro when auto-look is disabled
-        pcall(function()
-            local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
-            if autoLookGyro then
-                autoLookGyro:Destroy()
-            end
-        end)
-        -- Re-enable fly gyro if flying
-        if FlyEnabled and FlyBodyGyro then
-            pcall(function() FlyBodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge) end)
+-- Uses high-responsiveness BodyGyro for instant feel without disrupting movement
+local KillAura_autoLookGyro = nil
+
+local function KillAura_cleanupAutoLook()
+    -- Always clean up when disabled
+    pcall(function()
+        if KillAura_autoLookGyro then
+            KillAura_autoLookGyro:Destroy()
+            KillAura_autoLookGyro = nil
         end
+    end)
+    -- Also search and destroy any lingering gyros
+    pcall(function()
+        local char = LocalPlayer.Character
+        if char then
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local gyro = hrp:FindFirstChild("KatchiAutoLookGyro")
+                if gyro then gyro:Destroy() end
+            end
+        end
+    end)
+    -- Re-enable fly gyro if flying
+    if FlyEnabled and FlyBodyGyro then
+        pcall(function() FlyBodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge) end)
+    end
+end
+
+local function KillAura_performAutoLook(hrp)
+    -- If disabled, clean up everything and return
+    if not KillAuraAutoLook then
+        KillAura_cleanupAutoLook()
         return
     end
     
@@ -8699,14 +8990,7 @@ local function KillAura_performAutoLook(hrp)
     -- Find the actual nearest zombie (independent of Kill Aura targeting)
     local zombiesFolder = KillAura_getZombiesFolder()
     if not zombiesFolder then
-        -- No zombies folder, clean up and re-enable fly
-        pcall(function()
-            local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
-            if autoLookGyro then autoLookGyro:Destroy() end
-        end)
-        if FlyEnabled and FlyBodyGyro then
-            pcall(function() FlyBodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge) end)
-        end
+        KillAura_cleanupAutoLook()
         return
     end
     
@@ -8738,41 +9022,40 @@ local function KillAura_performAutoLook(hrp)
         
         if direction.Magnitude > 0.1 then
             if FlyEnabled then
-                -- When flying: disable fly's BodyGyro and use our own
+                -- When flying: disable fly's BodyGyro and use our own with very high responsiveness
                 if FlyBodyGyro then
                     pcall(function() FlyBodyGyro.MaxTorque = Vector3.new(0, 0, 0) end)
                 end
                 
-                -- Find or create our AutoLook BodyGyro with full torque
+                -- Find or create our AutoLook BodyGyro with VERY high P for instant response
                 local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
                 if not autoLookGyro then
                     autoLookGyro = Instance.new("BodyGyro")
                     autoLookGyro.Name = "KatchiAutoLookGyro"
                     autoLookGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-                    autoLookGyro.P = 50000
-                    autoLookGyro.D = 1000
+                    autoLookGyro.P = 1000000 -- Very high P for near-instant rotation
+                    autoLookGyro.D = 500 -- Lower D to reduce oscillation
                     autoLookGyro.Parent = hrp
-                else
-                    -- Ensure full torque when flying
-                    autoLookGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+                    KillAura_autoLookGyro = autoLookGyro
                 end
                 
                 -- Set target rotation (full 3D look at target)
                 autoLookGyro.CFrame = CFrame.lookAt(hrpPos, lookAt)
             else
-                -- Not flying: use Y-axis only rotation
+                -- Not flying: use Y-axis only rotation with very high responsiveness
                 local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
                 if not autoLookGyro then
                     autoLookGyro = Instance.new("BodyGyro")
                     autoLookGyro.Name = "KatchiAutoLookGyro"
-                    autoLookGyro.MaxTorque = Vector3.new(0, 1e6, 0) -- Only Y-axis rotation
-                    autoLookGyro.P = 50000
-                    autoLookGyro.D = 1000
+                    autoLookGyro.MaxTorque = Vector3.new(0, math.huge, 0) -- Only Y-axis rotation (doesn't affect movement)
+                    autoLookGyro.P = 1000000 -- Very high P for near-instant rotation
+                    autoLookGyro.D = 500 -- Lower D to reduce oscillation
                     autoLookGyro.Parent = hrp
+                    KillAura_autoLookGyro = autoLookGyro
                 end
                 
                 -- Set target rotation
-                autoLookGyro.CFrame = CFrame.lookAt(hrpPos, hrpPos + direction.Unit)
+                autoLookGyro.CFrame = CFrame.lookAt(hrpPos, lookAt)
             end
         end
     else
@@ -8781,6 +9064,7 @@ local function KillAura_performAutoLook(hrp)
             local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
             if autoLookGyro then
                 autoLookGyro:Destroy()
+                KillAura_autoLookGyro = nil
             end
         end)
         
@@ -9166,10 +9450,14 @@ _G.KatchiToggleElements.BayonetKillAura = BayonetKillAuraToggle
 local AutoLookToggle = KillAuraSection:Toggle({
     Title = "Auto Look",
     Flag = "KillAura_AutoLook",
-    Desc = "Automatically looks at the nearest zombie",
+    Desc = "Automatically looks at the nearest zombie (instant)",
     Default = false,
     Callback = function(v)
         KillAuraAutoLook = v
+        if not v then
+            -- Immediately cleanup when disabled
+            KillAura_cleanupAutoLook()
+        end
         WindUI:Notify({
             Title = "Kill Aura",
             Content = v and "Auto Look ON" or "Auto Look OFF",
@@ -14296,14 +14584,14 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         AnimPresetSection:Paragraph({ Title = "━━━ Zombie Animations ━━━", Desc = "" })
         
         AnimPresetSection:Button({
-            Title = "Ancient Zapper",
-            Desc = "Ancient Zapper zombie animation with effect",
+            Title = "Zapper",
+            Desc = "Zapper zombie animation with effect",
             Callback = function()
                 local animator, humanoid = getAnimator()
                 if not animator then return end
                 stopAllPresets()
-                presetActiveStates["Ancient Zapper"] = true
-                presetPlayingTracks["Ancient Zapper"] = {}
+                presetActiveStates["Zapper"] = true
+                presetPlayingTracks["Zapper"] = {}
                 
                 -- Effect animation
                 local effectAnim = Instance.new("Animation")
@@ -14312,9 +14600,9 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
                 effectTrack.Priority = Enum.AnimationPriority.Action3
                 effectTrack.Looped = true
                 effectTrack:Play()
-                table.insert(presetPlayingTracks["Ancient Zapper"], effectTrack)
+                table.insert(presetPlayingTracks["Zapper"], effectTrack)
                 
-                playIdleWalkPreset("Ancient Zapper", "12333488814", "12333490576", Enum.AnimationPriority.Action2, nil)
+                playIdleWalkPreset("Zapper", "12333488814", "12333490576", Enum.AnimationPriority.Action2, nil)
             end
         })
         
@@ -14349,9 +14637,9 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         })
         
         AnimPresetSection:Button({
-            Title = "Lantern Carrier",
-            Desc = "Lantern carrier zombie animation",
-            Callback = function() playIdleWalkPreset("Lantern Carrier", "14678879479", "14678880308", Enum.AnimationPriority.Action3, nil) end
+            Title = "Lantern",
+            Desc = "Lantern zombie animation",
+            Callback = function() playIdleWalkPreset("Lantern", "14678879479", "14678880308", Enum.AnimationPriority.Action3, nil) end
         })
         
         AnimPresetSection:Button({
@@ -14367,9 +14655,9 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         })
         
         AnimPresetSection:Button({
-            Title = "Headless Soldier (US)",
-            Desc = "Headless soldier zombie animation",
-            Callback = function() playIdleWalkPreset("Headless Soldier", "107080941320600", "74764025513892", Enum.AnimationPriority.Action3, nil) end
+            Title = "Headless zombie",
+            Desc = "Headless zombie animation",
+            Callback = function() playIdleWalkPreset("Headless zombie", "107080941320600", "74764025513892", Enum.AnimationPriority.Action3, nil) end
         })
         
         AnimPresetSection:Button({
@@ -14381,27 +14669,21 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         AnimPresetSection:Button({
             Title = "Bomber Animation",
             Desc = "Self-destruct bomber animation",
-            Callback = function() playIdleWalkPreset("Bomber", "13211198049", "13211207597", Enum.AnimationPriority.Action3, nil) end
+            Callback = function() playIdleWalkPreset("Bomber Animation", "13211198049", "13211207597", Enum.AnimationPriority.Action3, nil) end
         })
         
         AnimPresetSection:Button({
-            Title = "Ancient Default",
-            Desc = "Ancient default zombie animation",
-            Callback = function() playIdleWalkPreset("Ancient Default", "180435571", "180426354", Enum.AnimationPriority.Idle, nil) end
+            Title = "Default",
+            Desc = "Default zombie animation",
+            Callback = function() playIdleWalkPreset("Default", "180435571", "180426354", Enum.AnimationPriority.Idle, nil) end
         })
         
         -- ===== CHARACTER ANIMATIONS =====
         AnimPresetSection:Paragraph({ Title = "━━━ Character Animations ━━━", Desc = "" })
         
         AnimPresetSection:Button({
-            Title = "Superman",
-            Desc = "Superman pose with increased speed (50)",
-            Callback = function() playIdleWalkPreset("Superman", "123279433658792", "123279433658792", Enum.AnimationPriority.Action3, 50) end
-        })
-        
-        AnimPresetSection:Button({
             Title = "Boxer",
-            Desc = "Boxing stance animation (click to punch)",
+            Desc = "Boxing animation (click to punch)",
             Callback = function() playIdleWalkPreset("Boxer", "124381258015151", "127477273497271", Enum.AnimationPriority.Action3, 17) end
         })
         
@@ -14412,15 +14694,15 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         })
         
         AnimPresetSection:Button({
-            Title = "Lone Warrior",
-            Desc = "Lone warrior stance (slow walk)",
-            Callback = function() playIdleWalkPreset("Lone Warrior", "111210841378590", "139186204185685", Enum.AnimationPriority.Action3, 5) end
+            Title = "Impaled walk",
+            Desc = "Impaled walk (slow walk)",
+            Callback = function() playIdleWalkPreset("Impaled walk", "111210841378590", "139186204185685", Enum.AnimationPriority.Action3, 5) end
         })
         
         AnimPresetSection:Button({
             Title = "Red Eyes",
-            Desc = "Red eyes animation with speed boost (50)",
-            Callback = function() playIdleWalkPreset("Red Eyes", "12581784105", "12581785298", Enum.AnimationPriority.Action3, 50) end
+            Desc = "Red eyes animation with speed boost (35)",
+            Callback = function() playIdleWalkPreset("Red Eyes", "12581784105", "12581785298", Enum.AnimationPriority.Action3, 35) end
         })
         
         AnimPresetSection:Button({
@@ -14481,7 +14763,7 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         })
         
         AnimPresetSection:Button({
-            Title = "True Halo (Fast Slash)",
+            Title = "Skibidi Fast Slash Ahhh",
             Desc = "Super fast slashing with spin",
             Callback = function()
                 local animator, humanoid = getAnimator()
@@ -14491,19 +14773,19 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
                 if not rootPart then return end
                 
                 stopAllPresets()
-                presetActiveStates["True Halo"] = true
-                presetPlayingTracks["True Halo"] = {}
+                presetActiveStates["Skibidi Fast Slash Ahhh"] = true
+                presetPlayingTracks["Skibidi Fast Slash Ahhh"] = {}
                 
                 local anim = Instance.new("Animation")
                 anim.AnimationId = "rbxassetid://12591938344"
                 local track = animator:LoadAnimation(anim)
                 track.Priority = Enum.AnimationPriority.Action4
-                table.insert(presetPlayingTracks["True Halo"], track)
+                table.insert(presetPlayingTracks["Skibidi Fast Slash Ahhh"], track)
                 
                 local rotationSpeed = 1440
                 
-                presetLoopConnections["True Halo"] = task.spawn(function()
-                    while presetActiveStates["True Halo"] do
+                presetLoopConnections["Skibidi Fast Slash Ahhh"] = task.spawn(function()
+                    while presetActiveStates["Skibidi Fast Slash Ahhh"] do
                         track:Play()
                         local deltaTime = task.wait(0.1)
                         if rootPart then
@@ -14512,7 +14794,7 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
                     end
                 end)
                 
-                WindUI:Notify({ Title = "Animation Preset", Content = "True Halo activated!", Duration = 2, Icon = "play" })
+                WindUI:Notify({ Title = "Animation Preset", Content = "Skibidi Fast Slash Ahhh activated!", Duration = 2, Icon = "play" })
             end
         })
         
@@ -14526,9 +14808,9 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         })
         
         AnimPresetSection:Button({
-            Title = "Despair Dance",
-            Desc = "Sad despair dance (20 sec)",
-            Callback = function() playOneShotPreset("Despair Dance", "14860627011", 20) end
+            Title = "Sad Dance",
+            Desc = "Sad dance (20 sec)",
+            Callback = function() playOneShotPreset("Sad Dance", "14860627011", 20) end
         })
         
         AnimPresetSection:Button({
@@ -14538,16 +14820,16 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         })
         
         AnimPresetSection:Button({
-            Title = "Candy Uncle (Headless)",
-            Desc = "Headless horseman with music (speed 70)",
+            Title = "Headless Horseman",
+            Desc = "Headless horseman with music (speed 38)",
             Callback = function()
                 local animator, humanoid = getAnimator()
                 if not animator then return end
                 local char = LocalPlayer.Character
                 
                 stopAllPresets()
-                presetActiveStates["Candy Uncle"] = true
-                presetPlayingTracks["Candy Uncle"] = {}
+                presetActiveStates["Headless Horseman"] = true
+                presetPlayingTracks["Headless Horseman"] = {}
                 
                 -- Create and play music
                 local music = Instance.new("Sound")
@@ -14557,18 +14839,18 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
                 music.Parent = char:FindFirstChild("Head") or char
                 music:Play()
                 
-                humanoid.WalkSpeed = 70
+                humanoid.WalkSpeed = 38
                 
-                playIdleWalkPreset("Candy Uncle", "13936362530", "13936362530", Enum.AnimationPriority.Action3, 70)
+                playIdleWalkPreset("Headless Horseman", "13936362530", "13936362530", Enum.AnimationPriority.Action3, 38)
                 
                 -- Store music for cleanup
-                presetLoopConnections["Candy Uncle Music"] = music
+                presetLoopConnections["Headless Horseman Music"] = music
             end
         })
         
         AnimPresetSection:Button({
-            Title = "Eating Mystery",
-            Desc = "Eating something mysterious (looping)",
+            Title = "Eating Long Stick",
+            Desc = "Eating something long (Gagging Noises)",
             Callback = function()
                 local animator, humanoid = getAnimator()
                 if not animator then return end
@@ -14604,19 +14886,7 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         })
         
         AnimPresetSection:Button({
-            Title = "Jacob",
-            Desc = "Jacob special animation",
-            Callback = function() playOneShotPreset("Jacob", "12404717502", nil) end
-        })
-        
-        AnimPresetSection:Button({
-            Title = "Zombie King",
-            Desc = "Zombie King animation",
-            Callback = function() playOneShotPreset("Zombie King", "13408244121", nil) end
-        })
-        
-        AnimPresetSection:Button({
-            Title = "Zombie Door Breach",
+            Title = "Zombie Breaking The Door",
             Desc = "Zombie breaking door animation",
             Callback = function() playOneShotPreset("Door Breach", "15593727441", nil) end
         })
@@ -14638,21 +14908,37 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
                 if not animator then return end
                 
                 stopAllPresets()
+                presetActiveStates["CuirassierStabbed"] = true
+                presetPlayingTracks["CuirassierStabbed"] = {}
                 humanoid.WalkSpeed = 0
                 
                 local anim1 = Instance.new("Animation")
                 anim1.AnimationId = "rbxassetid://121955221153387"
                 local track1 = animator:LoadAnimation(anim1)
                 track1.Priority = Enum.AnimationPriority.Action4
+                table.insert(presetPlayingTracks["CuirassierStabbed"], track1)
                 track1:Play()
                 
                 track1.Stopped:Connect(function()
+                    -- Check if preset was stopped manually
+                    if not presetActiveStates["CuirassierStabbed"] then
+                        humanoid.WalkSpeed = 16
+                        return
+                    end
+                    
                     local anim2 = Instance.new("Animation")
                     anim2.AnimationId = "rbxassetid://111210841378590"
                     local track2 = animator:LoadAnimation(anim2)
                     track2.Priority = Enum.AnimationPriority.Action4
+                    track2.Looped = true
+                    table.insert(presetPlayingTracks["CuirassierStabbed"], track2)
                     track2:Play()
-                    task.delay(4, function()
+                    
+                    track2.Stopped:Connect(function()
+                        if presetActiveStates["CuirassierStabbed"] then
+                            presetActiveStates["CuirassierStabbed"] = nil
+                            presetPlayingTracks["CuirassierStabbed"] = nil
+                        end
                         humanoid.WalkSpeed = 16
                     end)
                 end)
@@ -14662,7 +14948,7 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         })
         
         AnimPresetSection:Button({
-            Title = "Bone Fracture",
+            Title = "Breaking Bones",
             Desc = "Bone breaking/fracture animation",
             Callback = function()
                 local animator, humanoid = getAnimator()
@@ -14696,8 +14982,8 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         AnimPresetSection:Paragraph({ Title = "━━━ Cinematic Sequences ━━━", Desc = "" })
         
         AnimPresetSection:Button({
-            Title = "Old Blücher",
-            Desc = "Marshal Blücher cinematic sequence",
+            Title = "Blücher",
+            Desc = "Blücher cinematic sequence",
             Callback = function()
                 local animator, humanoid = getAnimator()
                 if not animator then return end
@@ -14756,8 +15042,8 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         })
         
         AnimPresetSection:Button({
-            Title = "Adjutant",
-            Desc = "Adjutant officer cinematic sequence",
+            Title = "idk",
+            Desc = "idk officer cinematic sequence",
             Callback = function()
                 local animator, humanoid = getAnimator()
                 if not animator then return end
@@ -14798,15 +15084,15 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
                     tracks[4].Stopped:Wait()
                     
                     presetActiveStates["Adjutant"] = false
-                    WindUI:Notify({ Title = "Animation Preset", Content = "Adjutant sequence complete!", Duration = 2, Icon = "check" })
+                    WindUI:Notify({ Title = "Animation Preset", Content = "idk sequence complete!", Duration = 2, Icon = "check" })
                 end)
                 
-                WindUI:Notify({ Title = "Animation Preset", Content = "Adjutant sequence started!", Duration = 2, Icon = "play" })
+                WindUI:Notify({ Title = "Animation Preset", Content = "idk sequence started!", Duration = 2, Icon = "play" })
             end
         })
         
         AnimPresetSection:Button({
-            Title = "Barry the Biter",
+            Title = "Barry",
             Desc = "Barry getting bitten cinematic sequence",
             Callback = function()
                 local animator, humanoid = getAnimator()
@@ -15131,26 +15417,22 @@ do -- // Misc Tab (forceful WalkSpeed loop, looped Fullbright & NoFog, removed J
         end)
     end
 
-    -- Movement UI: slider max 45
+    -- Movement UI: slider max 35 (does NOT immediately apply - waits for toggle)
     MovementSection:Slider({
         Title = "WalkSpeed",
         Flag = "Movement_1",
-        Desc = "Loop Walkspeed",
+        Desc = "Set walkspeed value",
         Step = 1,
-        Value = { Min = 16, Max = 45, Default = desiredWalkSpeed },
+        Value = { Min = 16, Max = 35, Default = desiredWalkSpeed },
         Callback = function(v)
-            desiredWalkSpeed = math.clamp(tonumber(v) or desiredWalkSpeed, 16, 45)
-            WindUI:Notify({
-                Title = "Movement",
-                Content = "WalkSpeed set to " .. tostring(desiredWalkSpeed),
-                Duration = 2,
-                Icon = "activity",
-            })
-            -- immediately apply to current humanoid
-            local char = LocalPlayer and LocalPlayer.Character
-            if char then
-                local hum = char:FindFirstChildOfClass("Humanoid")
-                if hum then safeSetWalk(hum, desiredWalkSpeed) end
+            desiredWalkSpeed = math.clamp(tonumber(v) or desiredWalkSpeed, 16, 35)
+            -- Only apply if the toggle is already enabled
+            if walkLoopEnabled then
+                local char = LocalPlayer and LocalPlayer.Character
+                if char then
+                    local hum = char:FindFirstChildOfClass("Humanoid")
+                    if hum then safeSetWalk(hum, desiredWalkSpeed) end
+                end
             end
         end
     })
@@ -15598,11 +15880,12 @@ do
     MovementSection:Slider({
         Title = "Fly Speed",
         Flag = "Movement_FlySpeed",
-        Step = 5,
+        Desc = "Adjust freecam fly speed",
+        Step = 1,
         Value = {
             Min = 10,
             Max = 200,
-            Default = 50,
+            Default = 25,
         },
         Callback = function(value)
             flySpeed = value
@@ -15872,6 +16155,154 @@ VisualSection:Toggle({
     end
 })
 
+-- === FOV Changer ===
+local originalFieldOfView = nil
+local fovChangerEnabled = false
+local currentFOV = 70
+local fovLockConnection = nil
+
+pcall(function()
+    originalFieldOfView = workspace.CurrentCamera.FieldOfView
+end)
+
+-- Force FOV every frame to prevent game from overriding it
+local function startFOVLock()
+    if fovLockConnection then fovLockConnection:Disconnect() end
+    fovLockConnection = RunService.RenderStepped:Connect(function()
+        if not fovChangerEnabled then return end
+        pcall(function()
+            local cam = workspace.CurrentCamera
+            if cam and cam.FieldOfView ~= currentFOV then
+                cam.FieldOfView = currentFOV
+            end
+        end)
+    end)
+end
+
+local function stopFOVLock()
+    if fovLockConnection then
+        fovLockConnection:Disconnect()
+        fovLockConnection = nil
+    end
+end
+
+local function applyFOV(fov)
+    pcall(function()
+        workspace.CurrentCamera.FieldOfView = fov
+    end)
+end
+
+local function restoreFOV()
+    pcall(function()
+        workspace.CurrentCamera.FieldOfView = originalFieldOfView or 70
+    end)
+end
+
+-- Re-apply FOV on respawn (camera gets recreated)
+LocalPlayer.CharacterAdded:Connect(function()
+    if fovChangerEnabled then
+        task.delay(0.5, function()
+            applyFOV(currentFOV)
+        end)
+    end
+end)
+
+VisualSection:Toggle({
+    Title = "FOV Changer",
+    Flag = "Visual_FOVChanger",
+    Desc = "Change your camera field of view (locked - game can't reset it)",
+    Default = false,
+    Callback = function(state)
+        fovChangerEnabled = state
+        if state then
+            applyFOV(currentFOV)
+            startFOVLock() -- Lock FOV so nothing can change it
+            WindUI:Notify({ Title = "Visual", Content = "FOV Changer enabled (" .. currentFOV .. ") - Locked", Duration = 2, Icon = "eye" })
+        else
+            stopFOVLock()
+            restoreFOV()
+            WindUI:Notify({ Title = "Visual", Content = "FOV Changer disabled.", Duration = 2, Icon = "eye-off" })
+        end
+    end
+})
+
+VisualSection:Slider({
+    Title = "FOV Value",
+    Flag = "Visual_FOVValue",
+    Desc = "Adjust field of view (default: 70)",
+    Value = { Min = 30, Max = 120, Default = 70 },
+    Callback = function(value)
+        currentFOV = value
+        if fovChangerEnabled then
+            applyFOV(value)
+        end
+    end
+})
+
+-- === Infinite Zoom ===
+local infiniteZoomEnabled = false
+local originalMinZoomDistance = nil
+local originalMaxZoomDistance = nil
+local zoomConnection = nil
+
+local function applyInfiniteZoom()
+    pcall(function()
+        local player = Players.LocalPlayer
+        if not player then return end
+        
+        -- Store original values
+        if originalMinZoomDistance == nil then
+            originalMinZoomDistance = player.CameraMinZoomDistance
+        end
+        if originalMaxZoomDistance == nil then
+            originalMaxZoomDistance = player.CameraMaxZoomDistance
+        end
+        
+        -- Set infinite zoom
+        player.CameraMinZoomDistance = 0.5
+        player.CameraMaxZoomDistance = 9999
+    end)
+end
+
+local function restoreZoom()
+    pcall(function()
+        local player = Players.LocalPlayer
+        if not player then return end
+        
+        player.CameraMinZoomDistance = originalMinZoomDistance or 0.5
+        player.CameraMaxZoomDistance = originalMaxZoomDistance or 128
+    end)
+end
+
+VisualSection:Toggle({
+    Title = "Infinite Zoom",
+    Flag = "Visual_InfiniteZoom",
+    Desc = "Remove zoom distance limits",
+    Default = false,
+    Callback = function(state)
+        infiniteZoomEnabled = state
+        if state then
+            applyInfiniteZoom()
+            -- Keep applying in case game resets it
+            if zoomConnection then zoomConnection:Disconnect() end
+            zoomConnection = RunService.Heartbeat:Connect(function()
+                if not infiniteZoomEnabled then return end
+                pcall(function()
+                    local player = Players.LocalPlayer
+                    if player and player.CameraMaxZoomDistance < 9999 then
+                        player.CameraMaxZoomDistance = 9999
+                    end
+                end)
+            end)
+            WindUI:Notify({ Title = "Visual", Content = "Infinite Zoom enabled.", Duration = 2, Icon = "zoom-in" })
+        else
+            if zoomConnection then zoomConnection:Disconnect() zoomConnection = nil end
+            restoreZoom()
+            WindUI:Notify({ Title = "Visual", Content = "Infinite Zoom disabled.", Duration = 2, Icon = "zoom-out" })
+        end
+    end
+})
+
     -- === Server Modifiers ===
     noFallDamageEnabled = false -- Global for keybind access
     noFallDamageThread = nil -- Global for keybind access
@@ -16000,7 +16431,7 @@ VisualSection:Toggle({
 
     -- === Fly (Climbing-based smooth flight) ===
     FlyEnabled = false -- Global for keybind access
-    FlySpeed = 40 -- Default fly speed
+    FlySpeed = 25 -- Default fly speed
     local flyBodyVelocity = nil
     FlyBodyGyro = nil -- Global so Auto Look can detect flying
     local flyConnection = nil
@@ -16462,10 +16893,325 @@ VisualSection:Toggle({
         Title = "Fly Speed",
         Flag = "ServerMods_FlySpeed",
         Desc = "Adjust flight speed",
-        Step = 5,
-        Value = { Min = 10, Max = 40, Default = 40 },
+        Step = 1,
+        Value = { Min = 10, Max = 35, Default = 25 },
         Callback = function(v)
-            FlySpeed = tonumber(v) or 40
+            FlySpeed = tonumber(v) or 25
+        end
+    })
+
+    -- === Anti Break Bones (Auto Fly on Long Fall) ===
+    local antiBreakBonesEnabled = false
+    local antiBreakBonesConnection = nil
+    local fallStartTime = nil
+    local FALL_DURATION_THRESHOLD = 0.7 -- seconds of falling before activating fly
+    local antiBreakBonesCooldown = false -- Prevent rapid toggling
+    
+    local function startAntiBreakBones()
+        if antiBreakBonesConnection then
+            antiBreakBonesConnection:Disconnect()
+            antiBreakBonesConnection = nil
+        end
+        
+        fallStartTime = nil
+        
+        antiBreakBonesConnection = RunService.Heartbeat:Connect(function()
+            if not antiBreakBonesEnabled then return end
+            if antiBreakBonesCooldown then return end
+            
+            local char = LocalPlayer.Character
+            if not char then 
+                fallStartTime = nil
+                return 
+            end
+            
+            local humanoid = char:FindFirstChildOfClass("Humanoid")
+            if not humanoid then 
+                fallStartTime = nil
+                return 
+            end
+            
+            local state = humanoid:GetState()
+            local isFalling = (state == Enum.HumanoidStateType.Freefall or state == Enum.HumanoidStateType.FallingDown)
+            
+            -- Don't interfere if fly is already enabled by user
+            if FlyEnabled then
+                fallStartTime = nil
+                return
+            end
+            
+            if isFalling then
+                if not fallStartTime then
+                    fallStartTime = os.clock()
+                else
+                    local fallDuration = os.clock() - fallStartTime
+                    
+                    if fallDuration >= FALL_DURATION_THRESHOLD then
+                        -- Been falling too long, activate fly briefly to break fall
+                        antiBreakBonesCooldown = true
+                        fallStartTime = nil
+                        
+                        task.spawn(function()
+                            pcall(function()
+                                -- Enable fly
+                                FlyEnabled = true
+                                startFly()
+                                
+                                -- Wait a brief moment for velocity to reset
+                                task.wait(0.15)
+                                
+                                -- Disable fly
+                                FlyEnabled = false
+                                stopFly()
+                                
+                                -- Small cooldown before checking again
+                                task.wait(0.5)
+                                antiBreakBonesCooldown = false
+                            end)
+                        end)
+                    end
+                end
+            else
+                -- Not falling, reset timer
+                fallStartTime = nil
+            end
+        end)
+    end
+    
+    local function stopAntiBreakBones()
+        if antiBreakBonesConnection then
+            antiBreakBonesConnection:Disconnect()
+            antiBreakBonesConnection = nil
+        end
+        fallStartTime = nil
+        antiBreakBonesCooldown = false
+    end
+    
+    local AntiBreakBonesToggle = ServerModifiersSection:Toggle({
+        Title = "Anti Break Bones",
+        Flag = "ServerMods_AntiBreakBones",
+        Desc = "Auto-activates Fly briefly when falling for 0.7s to prevent bone breaking.",
+        Default = false,
+        Callback = function(state)
+            antiBreakBonesEnabled = state
+            
+            if state then
+                startAntiBreakBones()
+                WindUI:Notify({
+                    Title = "Server Modifiers",
+                    Content = "Anti Break Bones enabled.",
+                    Duration = 3,
+                    Icon = "bone",
+                })
+            else
+                stopAntiBreakBones()
+                WindUI:Notify({
+                    Title = "Server Modifiers",
+                    Content = "Anti Break Bones disabled.",
+                    Duration = 2,
+                    Icon = "bone",
+                })
+            end
+        end
+    })
+    _G.KatchiToggleElements.AntiBreakBones = AntiBreakBonesToggle
+
+    -- === Noclip Bypass (Enhanced with Anti-Teleport) ===
+    local NoclipEnabled = false
+    local noclipConnection = nil
+    local noclipOriginalCanCollide = setmetatable({}, { __mode = "k" }) -- Weak keys for GC
+    
+    -- Anti-teleport bypass state
+    local lastValidPosition = nil -- Last position before going through walls
+    local noclipStartPosition = nil -- Position when noclip was enabled
+    local antiTeleportConnection = nil
+    local positionEmulationEnabled = false
+    
+    -- Track position for anti-teleport (spoof position to anti-cheat)
+    local spoofedPosition = nil
+    local lastRealPosition = nil
+    local TELEPORT_THRESHOLD = 50 -- studs; if teleported more than this, block it
+    local POSITION_UPDATE_INTERVAL = 0.5 -- How often to update spoofed position
+    
+    local function setCharacterNoclip(char, enabled)
+        if not char then return end
+        for _, part in pairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                if enabled then
+                    -- Store original CanCollide before disabling
+                    if noclipOriginalCanCollide[part] == nil then
+                        noclipOriginalCanCollide[part] = part.CanCollide
+                    end
+                    part.CanCollide = false
+                else
+                    -- Restore original CanCollide
+                    if noclipOriginalCanCollide[part] ~= nil then
+                        part.CanCollide = noclipOriginalCanCollide[part]
+                        noclipOriginalCanCollide[part] = nil
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Anti-teleport: Detect and block server teleport attempts
+    local function setupAntiTeleport(char)
+        if antiTeleportConnection then
+            antiTeleportConnection:Disconnect()
+            antiTeleportConnection = nil
+        end
+        
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        
+        -- Store starting position
+        noclipStartPosition = hrp.Position
+        lastValidPosition = hrp.Position
+        lastRealPosition = hrp.Position
+        
+        -- Monitor for sudden teleports (anti-cheat trying to move us back)
+        antiTeleportConnection = hrp:GetPropertyChangedSignal("CFrame"):Connect(function()
+            if not NoclipEnabled then return end
+            
+            local currentPos = hrp.Position
+            local distance = (currentPos - lastRealPosition).Magnitude
+            
+            -- If we suddenly moved a large distance (server teleport), block it
+            if distance > TELEPORT_THRESHOLD then
+                -- Teleport detected! Move back to our position
+                task.defer(function()
+                    pcall(function()
+                        hrp.CFrame = CFrame.new(lastRealPosition) * (hrp.CFrame - hrp.Position)
+                    end)
+                end)
+            else
+                -- Normal movement, update our tracked position
+                lastRealPosition = currentPos
+            end
+        end)
+        
+        -- Also emulate position property if hooks available
+        if _G.EmulateProperty and positionEmulationEnabled then
+            pcall(function()
+                -- Spoof the position to appear at last valid position
+                _G.EmulateProperty(hrp, "Position", lastValidPosition)
+            end)
+        end
+    end
+    
+    local function cleanupAntiTeleport()
+        if antiTeleportConnection then
+            antiTeleportConnection:Disconnect()
+            antiTeleportConnection = nil
+        end
+        noclipStartPosition = nil
+        lastValidPosition = nil
+        lastRealPosition = nil
+        spoofedPosition = nil
+    end
+
+    local function startNoclip()
+        local char = LocalPlayer.Character
+        if not char then return end
+        
+        -- Stop existing connection
+        if noclipConnection then
+            noclipConnection:Disconnect()
+            noclipConnection = nil
+        end
+        
+        -- Setup anti-teleport protection
+        setupAntiTeleport(char)
+        
+        -- Apply noclip every frame to prevent game from re-enabling collision
+        noclipConnection = RunService.Stepped:Connect(function()
+            if NoclipEnabled then
+                local character = LocalPlayer.Character
+                if character then
+                    for _, part in pairs(character:GetDescendants()) do
+                        if part:IsA("BasePart") then
+                            part.CanCollide = false
+                        end
+                    end
+                end
+            end
+        end)
+        
+        setCharacterNoclip(char, true)
+    end
+
+    local function stopNoclip()
+        if noclipConnection then
+            noclipConnection:Disconnect()
+            noclipConnection = nil
+        end
+        
+        -- Cleanup anti-teleport
+        cleanupAntiTeleport()
+        
+        local char = LocalPlayer.Character
+        if char then
+            setCharacterNoclip(char, false)
+        end
+        
+        -- Clear stored values
+        noclipOriginalCanCollide = setmetatable({}, { __mode = "k" })
+    end
+
+    -- Handle character respawn
+    LocalPlayer.CharacterAdded:Connect(function(newChar)
+        if NoclipEnabled then
+            task.wait(0.3)
+            startNoclip()
+        end
+    end)
+
+    local NoclipToggle = ServerModifiersSection:Toggle({
+        Title = "Noclip",
+        Flag = "ServerMods_Noclip",
+        Desc = "Noclip Bypass.",
+        Default = false,
+        Callback = function(state)
+            NoclipEnabled = state
+            
+            if state then
+                startNoclip()
+                WindUI:Notify({
+                    Title = "Server Modifiers",
+                    Content = "Noclip enabled with anti-teleport bypass.",
+                    Duration = 3,
+                    Icon = "ghost",
+                })
+            else
+                stopNoclip()
+                WindUI:Notify({
+                    Title = "Server Modifiers",
+                    Content = "Noclip disabled.",
+                    Duration = 2,
+                    Icon = "ghost",
+                })
+            end
+        end
+    })
+    _G.KatchiToggleElements.Noclip = NoclipToggle
+    
+    -- Position Emulation Toggle (advanced bypass)
+    ServerModifiersSection:Toggle({
+        Title = "Noclip Position Spoof",
+        Flag = "ServerMods_NoclipPositionSpoof",
+        Desc = "Spoof your position to anti-cheat (requires advanced executor)",
+        Default = false,
+        Callback = function(state)
+            positionEmulationEnabled = state
+            if state and NoclipEnabled then
+                local char = LocalPlayer.Character
+                local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                if hrp and _G.EmulateProperty then
+                    pcall(function()
+                        _G.EmulateProperty(hrp, "Position", hrp.Position)
+                    end)
+                end
+            end
         end
     })
 
@@ -18321,12 +19067,12 @@ task.wait(0.1) -- Delay to prevent lag
 do -- // Final task.spawn and connects
         WindUI:Notify({
             Title = "Katchi Hub Loaded",
-            Content = "Successfully loaded Katchi Hub v4.2\nUse RightShift key to toggle the menu",
+            Content = "Successfully loaded Katchi Hub v4.3\nUse RightShift key to toggle the menu",
             Duration = 5,
             Icon = "zap",
         })
 
-    print("Katchi Hub v4.2 successfully loaded!")
+    print("Katchi Hub v4.3 successfully loaded!")
     print("Made by Yuki")
     print("i like dawgs!")
 end -- end of Final block
@@ -18339,7 +19085,18 @@ do -- // Changelog Popup UI
     -- Changelog entries (each entry is a version with its changes)
     -- Format: { version = "vX.X.X", date = "Date", changes = { {type = "fix/feature/update", text = "Description"}, ... } }
     local CHANGELOG_ENTRIES = {
-                                                                        {
+                                                                 {
+            version = "v4.3",
+            date = "January 2026",
+            changes = {
+                {type = "feature", text = "Added Animation Presets!"},
+                {type = "feature", text = "Added Change Fov!"},
+                {type = "feature", text = "Added Infinite Zoom!"},
+                {type = "fix", text = "Reduced Lag From Bypass"},
+                {type = "fix", text = "Fixed Bugs"},
+            }
+        },
+                                                                 {
             version = "v4.2",
             date = "January 2026",
             changes = {
