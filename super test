@@ -16387,135 +16387,6 @@ VisualSection:Toggle({
     _G.KatchiToggleElements = _G.KatchiToggleElements or {}
     _G.KatchiToggleElements.NoFallDamage = NoFallDamageToggle
 
-    -- === Anti Break Bones (Auto Fly on Long Fall) ===
-    -- Note: This feature uses startFly/stopFly which are defined later, but works due to Lua's dynamic lookup
-    local antiBreakBonesEnabled = false
-    local antiBreakBonesConnection = nil
-    local fallStartTime = nil
-    local FALL_DURATION_THRESHOLD = 0.15 -- seconds of falling before activating fly
-    local antiBreakBonesCooldown = false -- Prevent rapid toggling
-    
-    local function startAntiBreakBones()
-        if antiBreakBonesConnection then
-            antiBreakBonesConnection:Disconnect()
-            antiBreakBonesConnection = nil
-        end
-        
-        fallStartTime = nil
-        
-        antiBreakBonesConnection = RunService.Heartbeat:Connect(function()
-            if not antiBreakBonesEnabled then return end
-            if antiBreakBonesCooldown then return end
-            
-            local char = LocalPlayer.Character
-            if not char then 
-                fallStartTime = nil
-                return 
-            end
-            
-            local humanoid = char:FindFirstChildOfClass("Humanoid")
-            if not humanoid then 
-                fallStartTime = nil
-                return 
-            end
-            
-            local state = humanoid:GetState()
-            -- Detect all falling states including after jumping
-            local isFalling = (state == Enum.HumanoidStateType.Freefall 
-                            or state == Enum.HumanoidStateType.FallingDown)
-            
-            -- Also check vertical velocity as backup detection
-            local hrp = char:FindFirstChild("HumanoidRootPart")
-            if hrp and not isFalling then
-                local velY = hrp.AssemblyLinearVelocity.Y
-                -- If moving downward fast (more than -20 studs/sec), consider it falling
-                if velY < -20 then
-                    isFalling = true
-                end
-            end
-            
-            -- Don't interfere if fly is already enabled by user
-            if FlyEnabled then
-                fallStartTime = nil
-                return
-            end
-            
-            if isFalling then
-                if not fallStartTime then
-                    fallStartTime = os.clock()
-                else
-                    local fallDuration = os.clock() - fallStartTime
-                    
-                    if fallDuration >= FALL_DURATION_THRESHOLD then
-                        -- Been falling too long, activate fly briefly to break fall
-                        antiBreakBonesCooldown = true
-                        fallStartTime = nil
-                        
-                        task.spawn(function()
-                            pcall(function()
-                                -- Enable fly
-                                FlyEnabled = true
-                                startFly()
-                                
-                                -- Keep fly on for 0.5 seconds to safely break the fall
-                                task.wait(0.5)
-                                
-                                -- Disable fly
-                                FlyEnabled = false
-                                stopFly()
-                                
-                                -- Small cooldown before checking again
-                                task.wait(0.3)
-                                antiBreakBonesCooldown = false
-                            end)
-                        end)
-                    end
-                end
-            else
-                -- Not falling, reset timer
-                fallStartTime = nil
-            end
-        end)
-    end
-    
-    local function stopAntiBreakBones()
-        if antiBreakBonesConnection then
-            antiBreakBonesConnection:Disconnect()
-            antiBreakBonesConnection = nil
-        end
-        fallStartTime = nil
-        antiBreakBonesCooldown = false
-    end
-    
-    local AntiBreakBonesToggle = ServerModifiersSection:Toggle({
-        Title = "Anti Break Bones",
-        Flag = "ServerMods_AntiBreakBones",
-        Desc = "Auto-activates Fly briefly when falling for 0.7s to prevent bone breaking.",
-        Default = false,
-        Callback = function(state)
-            antiBreakBonesEnabled = state
-            
-            if state then
-                startAntiBreakBones()
-                WindUI:Notify({
-                    Title = "Server Modifiers",
-                    Content = "Anti Break Bones enabled.",
-                    Duration = 3,
-                    Icon = "bone",
-                })
-            else
-                stopAntiBreakBones()
-                WindUI:Notify({
-                    Title = "Server Modifiers",
-                    Content = "Anti Break Bones disabled.",
-                    Duration = 2,
-                    Icon = "bone",
-                })
-            end
-        end
-    })
-    _G.KatchiToggleElements.AntiBreakBones = AntiBreakBonesToggle
-
     -- === Baguette Purchase ===
     ServerModifiersSection:Button({
         Title = "Get Baguette",
@@ -17001,138 +16872,99 @@ VisualSection:Toggle({
         end
     })
 
-    -- === Noclip Bypass ===
+    -- === Noclip Bypass (Fly Only) ===
+    -- Efficient noclip that only works when Fly is enabled
     local NoclipEnabled = false
     local noclipConnection = nil
-    local noclipOriginalCanCollide = setmetatable({}, { __mode = "k" }) -- Weak keys for GC
+    local noclipParts = {} -- Cache character parts for efficiency
     
-    -- Anti-teleport bypass state
-    local lastRealPosition = nil
-    local antiTeleportConnection = nil
-    local TELEPORT_THRESHOLD = 50 -- studs; if teleported more than this, block it
-    
-    local function setCharacterNoclip(char, enabled)
+    local function cacheCharacterParts(char)
+        noclipParts = {}
         if not char then return end
         for _, part in pairs(char:GetDescendants()) do
             if part:IsA("BasePart") then
-                if enabled then
-                    if noclipOriginalCanCollide[part] == nil then
-                        noclipOriginalCanCollide[part] = part.CanCollide
-                    end
-                    part.CanCollide = false
-                else
-                    if noclipOriginalCanCollide[part] ~= nil then
-                        part.CanCollide = noclipOriginalCanCollide[part]
-                        noclipOriginalCanCollide[part] = nil
-                    end
-                end
+                table.insert(noclipParts, part)
             end
         end
     end
     
-    local function setupAntiTeleport(char)
-        if antiTeleportConnection then
-            antiTeleportConnection:Disconnect()
-            antiTeleportConnection = nil
-        end
-        
-        local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        if not hrp then return end
-        
-        lastRealPosition = hrp.Position
-        
-        antiTeleportConnection = hrp:GetPropertyChangedSignal("CFrame"):Connect(function()
-            if not NoclipEnabled then return end
-            
-            local currentPos = hrp.Position
-            local distance = (currentPos - lastRealPosition).Magnitude
-            
-            if distance > TELEPORT_THRESHOLD then
-                task.defer(function()
-                    pcall(function()
-                        hrp.CFrame = CFrame.new(lastRealPosition) * (hrp.CFrame - hrp.Position)
-                    end)
-                end)
-            else
-                lastRealPosition = currentPos
-            end
-        end)
-    end
-    
-    local function cleanupAntiTeleport()
-        if antiTeleportConnection then
-            antiTeleportConnection:Disconnect()
-            antiTeleportConnection = nil
-        end
-        lastRealPosition = nil
-    end
-
     local function startNoclip()
+        if noclipConnection then return end -- Already running
+        
         local char = LocalPlayer.Character
         if not char then return end
         
-        if noclipConnection then
-            noclipConnection:Disconnect()
-            noclipConnection = nil
-        end
+        cacheCharacterParts(char)
         
-        setupAntiTeleport(char)
+        -- Listen for new parts added to character
+        local addedConn = char.DescendantAdded:Connect(function(part)
+            if part:IsA("BasePart") then
+                table.insert(noclipParts, part)
+            end
+        end)
         
         noclipConnection = RunService.Stepped:Connect(function()
-            if NoclipEnabled then
-                local character = LocalPlayer.Character
-                if character then
-                    for _, part in pairs(character:GetDescendants()) do
-                        if part:IsA("BasePart") then
-                            part.CanCollide = false
-                        end
+            -- Only apply noclip when both noclip is enabled AND fly is active
+            if NoclipEnabled and FlyEnabled then
+                for i = #noclipParts, 1, -1 do
+                    local part = noclipParts[i]
+                    if part and part.Parent then
+                        part.CanCollide = false
+                    else
+                        table.remove(noclipParts, i) -- Clean up destroyed parts
                     end
                 end
             end
         end)
         
-        setCharacterNoclip(char, true)
+        -- Store connection to disconnect later
+        noclipConnection.AddedConn = addedConn
     end
 
     local function stopNoclip()
         if noclipConnection then
+            if noclipConnection.AddedConn then
+                noclipConnection.AddedConn:Disconnect()
+            end
             noclipConnection:Disconnect()
             noclipConnection = nil
         end
-        
-        cleanupAntiTeleport()
-        
-        local char = LocalPlayer.Character
-        if char then
-            setCharacterNoclip(char, false)
-        end
-        
-        noclipOriginalCanCollide = setmetatable({}, { __mode = "k" })
+        noclipParts = {}
     end
 
+    -- Re-cache parts on respawn
     LocalPlayer.CharacterAdded:Connect(function(newChar)
         if NoclipEnabled then
-            task.wait(0.3)
-            startNoclip()
+            task.wait(0.2)
+            cacheCharacterParts(newChar)
         end
     end)
 
     local NoclipToggle = ServerModifiersSection:Toggle({
         Title = "Noclip Bypass",
         Flag = "ServerMods_NoclipBypass",
-        Desc = "Walk through walls with anti-teleport bypass.",
+        Desc = "Walk through walls while flying. Requires Fly to be enabled.",
         Default = false,
         Callback = function(state)
             NoclipEnabled = state
             
             if state then
+                if not FlyEnabled then
+                    WindUI:Notify({
+                        Title = "Server Modifiers",
+                        Content = "Noclip Bypass ready. Enable Fly to activate.",
+                        Duration = 3,
+                        Icon = "ghost",
+                    })
+                else
+                    WindUI:Notify({
+                        Title = "Server Modifiers",
+                        Content = "Noclip Bypass enabled.",
+                        Duration = 3,
+                        Icon = "ghost",
+                    })
+                end
                 startNoclip()
-                WindUI:Notify({
-                    Title = "Server Modifiers",
-                    Content = "Noclip Bypass enabled.",
-                    Duration = 3,
-                    Icon = "ghost",
-                })
             else
                 stopNoclip()
                 WindUI:Notify({
