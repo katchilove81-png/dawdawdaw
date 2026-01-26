@@ -170,12 +170,7 @@ local function setupInstanceCloaking()
         
         -- Hook GetChildren
         oldGetChildren = hookfunction(folder.GetChildren, newcclosure(function(self)
-            -- Allow our own calls through
-            if checkcaller and checkcaller() then
-                return oldGetChildren(self)
-            end
-            local success, children = pcall(oldGetChildren, self)
-            if not success or not children then return oldGetChildren(self) end
+            local children = oldGetChildren(self)
             local filtered = {}
             for _, child in ipairs(children) do
                 if not CloakedInstances[child] then
@@ -187,12 +182,7 @@ local function setupInstanceCloaking()
         
         -- Hook GetDescendants
         oldGetDescendants = hookfunction(folder.GetDescendants, newcclosure(function(self)
-            -- Allow our own calls through
-            if checkcaller and checkcaller() then
-                return oldGetDescendants(self)
-            end
-            local success, descendants = pcall(oldGetDescendants, self)
-            if not success or not descendants then return oldGetDescendants(self) end
+            local descendants = oldGetDescendants(self)
             local filtered = {}
             for _, desc in ipairs(descendants) do
                 if not CloakedInstances[desc] then
@@ -204,14 +194,6 @@ local function setupInstanceCloaking()
         
         -- Hook FindFirstChild
         oldFindFirstChild = hookfunction(folder.FindFirstChild, newcclosure(function(self, name, recursive)
-            -- Allow our own calls through
-            if checkcaller and checkcaller() then
-                if recursive then
-                    return oldFindFirstChild(self, name, true)
-                else
-                    return oldFindFirstChild(self, name)
-                end
-            end
             local result
             if recursive then
                 result = oldFindFirstChild(self, name, true)
@@ -226,10 +208,6 @@ local function setupInstanceCloaking()
         
         -- Hook FindFirstChildOfClass
         oldFindFirstChildOfClass = hookfunction(folder.FindFirstChildOfClass, newcclosure(function(self, className)
-            -- Allow our own calls through
-            if checkcaller and checkcaller() then
-                return oldFindFirstChildOfClass(self, className)
-            end
             local result = oldFindFirstChildOfClass(self, className)
             if result and CloakedInstances[result] then
                 return nil
@@ -239,10 +217,6 @@ local function setupInstanceCloaking()
         
         -- Hook FindFirstChildWhichIsA
         oldFindFirstChildWhichIsA = hookfunction(folder.FindFirstChildWhichIsA, newcclosure(function(self, className)
-            -- Allow our own calls through
-            if checkcaller and checkcaller() then
-                return oldFindFirstChildWhichIsA(self, className)
-            end
             local result = oldFindFirstChildWhichIsA(self, className)
             if result and CloakedInstances[result] then
                 return nil
@@ -655,11 +629,6 @@ if hookmetamethod and checkcaller and getnamecallmethod then
                 return oldNamecall(self, ...)
             end
             
-            -- Always allow our own code to avoid interference
-            if checkcaller() then
-                return oldNamecall(self, ...)
-            end
-            
             local method = getnamecallmethod()
             local args = {...}
             
@@ -667,40 +636,53 @@ if hookmetamethod and checkcaller and getnamecallmethod then
             if method == "Kick" and self == LocalPlayer then
                 kickBlocked = kickBlocked + 1
                 if ANTIBAN_DEBUG then warn("[ANTI-BAN] Blocked Kick via namecall #" .. kickBlocked) end
-                return -- Return nothing for void methods
+                return nil
             end
             
-            -- Block suspicious remote calls
+            -- Block suspicious remote calls (both from us and anti-cheat)
             if method == "FireServer" or method == "InvokeServer" then
                 namecallInHook = true
                 local remoteName = ""
                 pcall(function() remoteName = self.Name end)
                 namecallInHook = false
                 
-                -- Block known anti-cheat/admin log remotes
+                -- Block known anti-cheat/admin log remotes (blocks OUTGOING too)
                 if blockedRemotes[remoteName] then
                     banBlocked = banBlocked + 1
                     if ANTIBAN_DEBUG then warn("[ANTI-BAN] Blocked suspicious remote: " .. remoteName) end
-                    return -- Return nothing to block
+                    return nil
                 end
                 
                 -- Pattern-based admin log detection
                 if isAdminLogRemote(remoteName) then
                     adminLogBlockCount = adminLogBlockCount + 1
                     if ANTIBAN_DEBUG then warn("[ANTI-BAN] Blocked admin log remote: " .. remoteName .. " (#" .. adminLogBlockCount .. ")") end
-                    return -- Return nothing to block
+                    return nil
                 end
                 
-                -- Check for suspicious arguments (only external calls)
-                local isSuspicious, keyword = containsSuspiciousArg(args)
-                if isSuspicious then
-                    if ANTIBAN_DEBUG then warn("[ANTI-BAN] Blocked remote with suspicious arg: " .. keyword) end
-                    return -- Return nothing to block
+                -- Check for suspicious arguments (only when not from us)
+                if not checkcaller() then
+                    local isSuspicious, keyword = containsSuspiciousArg(args)
+                    if isSuspicious then
+                        if ANTIBAN_DEBUG then warn("[ANTI-BAN] Blocked remote with suspicious arg: " .. keyword) end
+                        return nil
+                    end
                 end
             end
             
             return oldNamecall(self, ...)
         end) or function(self, ...)
+            if namecallInHook then
+                return oldNamecall(self, ...)
+            end
+            
+            local method = getnamecallmethod()
+            
+            if method == "Kick" and self == LocalPlayer then
+                kickBlocked = kickBlocked + 1
+                return nil
+            end
+            
             return oldNamecall(self, ...)
         end)
     end)
@@ -748,52 +730,50 @@ if hookmetamethod and checkcaller then
                 return oldIndex(self, key)
             end
             
-            -- Always allow our own code
-            if checkcaller() then
-                return oldIndex(self, key)
-            end
-            
-            indexInHook = true
-            
-            -- Wrap in pcall to prevent errors
-            local overrideValue = nil
-            local shouldOverride = false
-            
-            pcall(function()
-                -- Hide our GUI name
+            if not checkcaller() then
+                indexInHook = true
+                
+                -- Hide our GUI
                 if key == "Name" then
                     local success, name = pcall(function()
                         return oldIndex(self, "Name")
                     end)
                     if success and name == "RobloxSystemUI" then
-                        overrideValue = "RobloxGui"
-                        shouldOverride = true
-                        return
+                        indexInHook = false
+                        return "RobloxGui"
                     end
                 end
                 
                 -- Return emulated property values to fool anti-cheat
-                -- Only if the instance and property type match expected types
                 local hasEmulated, emulatedValue = getEmulatedValue(self, key)
                 if hasEmulated then
-                    -- Verify the emulated value type matches what's expected
-                    local realValue = nil
-                    pcall(function() realValue = oldIndex(self, key) end)
-                    if realValue ~= nil and typeof(emulatedValue) == typeof(realValue) then
-                        overrideValue = emulatedValue
-                        shouldOverride = true
-                    end
+                    indexInHook = false
+                    return emulatedValue
                 end
-            end)
-            
-            indexInHook = false
-            
-            if shouldOverride then
-                return overrideValue
+                
+                indexInHook = false
             end
             
             return oldIndex(self, key)
         end) or function(self, key)
+            if indexInHook then
+                return oldIndex(self, key)
+            end
+            
+            if not checkcaller() then
+                indexInHook = true
+                if key == "Name" then
+                    local success, name = pcall(function()
+                        return oldIndex(self, "Name")
+                    end)
+                    if success and name == "RobloxSystemUI" then
+                        indexInHook = false
+                        return "RobloxGui"
+                    end
+                end
+                indexInHook = false
+            end
+            
             return oldIndex(self, key)
         end)
     end)
@@ -803,18 +783,9 @@ end
 
 -- ===== 5. NEWINDEX HOOK (DETECT PROPERTY CHANGES) =====
 -- Can intercept when anti-cheat tries to modify our properties
--- Also handles Noclip CFrame blocking for fly bypass
 
 local oldNewIndex
 local newIndexInHook = false
-
--- Global flags for noclip bypass (accessed from Fly section)
-_G.NoclipBypassEnabled = false
-_G.FlyEnabledForNoclip = false
-
--- Track last valid position for smart teleport detection
-local lastKnownHRPPosition = nil
-local TELEPORT_THRESHOLD = 50 -- Only block if teleporting more than 50 studs
 
 if hookmetamethod and checkcaller then
     pcall(function()
@@ -823,58 +794,27 @@ if hookmetamethod and checkcaller then
                 return oldNewIndex(self, key, value)
             end
             
-            -- Always allow our own code
-            if checkcaller() then
-                return oldNewIndex(self, key, value)
-            end
-            
-            newIndexInHook = true
-            
-            -- Wrap in pcall to prevent any errors from breaking game
-            local shouldBlock = false
-            pcall(function()
-                local char = LocalPlayer and LocalPlayer.Character
-                if char and self and typeof(self) == "Instance" and self:IsDescendantOf(char) then
+            if not checkcaller() then
+                newIndexInHook = true
+                
+                -- Protect our character from forced resets
+                local char = LocalPlayer.Character
+                if char and self:IsDescendantOf(char) then
                     -- Block attempts to set WalkSpeed to 0 (anti-cheat punishment)
                     if key == "WalkSpeed" and value == 0 then
                         if ANTIBAN_DEBUG then warn("[ANTI-BAN] Blocked WalkSpeed = 0 attempt") end
-                        shouldBlock = true
-                        return
+                        newIndexInHook = false
+                        return nil
                     end
                     -- Block attempts to anchor our character
                     if key == "Anchored" and value == true then
                         if ANTIBAN_DEBUG then warn("[ANTI-BAN] Blocked Anchored = true attempt") end
-                        shouldBlock = true
-                        return
-                    end
-                    
-                    -- === NOCLIP BYPASS: Block server CFrame teleports ===
-                    if _G.NoclipBypassEnabled and _G.FlyEnabledForNoclip and key == "CFrame" then
-                        local partName = self.Name
-                        if partName == "HumanoidRootPart" or partName == "Torso" then
-                            -- Only block if it's a large teleport (anti-cheat reset)
-                            -- Allow small CFrame changes (animations, physics)
-                            if typeof(value) == "CFrame" and lastKnownHRPPosition then
-                                local newPos = value.Position
-                                local distance = (newPos - lastKnownHRPPosition).Magnitude
-                                if distance > TELEPORT_THRESHOLD then
-                                    if ANTIBAN_DEBUG then warn("[ANTI-BAN] Blocked teleport of " .. math.floor(distance) .. " studs") end
-                                    shouldBlock = true
-                                    return
-                                end
-                            end
-                        end
+                        newIndexInHook = false
+                        return nil
                     end
                 end
-            end)
-            
-            newIndexInHook = false
-            
-            if shouldBlock then
-                -- Return the original call anyway to prevent "unable to cast" errors
-                -- The value won't actually be set because we're not passing the new value
-                -- But this keeps the game's code flow intact
-                return oldNewIndex(self, key, self[key]) -- Set to current value (no change)
+                
+                newIndexInHook = false
             end
             
             return oldNewIndex(self, key, value)
@@ -883,34 +823,6 @@ if hookmetamethod and checkcaller then
         end)
     end)
 end
-
--- Update position tracker for noclip (runs on heartbeat when flying)
-local noclipPositionTracker = nil
-local function startNoclipPositionTracker()
-    if noclipPositionTracker then return end
-    noclipPositionTracker = RunService.Heartbeat:Connect(function()
-        if _G.NoclipBypassEnabled and _G.FlyEnabledForNoclip then
-            pcall(function()
-                local char = LocalPlayer and LocalPlayer.Character
-                local hrp = char and char:FindFirstChild("HumanoidRootPart")
-                if hrp then
-                    lastKnownHRPPosition = hrp.Position
-                end
-            end)
-        end
-    end)
-end
-
-local function stopNoclipPositionTracker()
-    if noclipPositionTracker then
-        noclipPositionTracker:Disconnect()
-        noclipPositionTracker = nil
-    end
-    lastKnownHRPPosition = nil
-end
-
--- Auto-start position tracker
-startNoclipPositionTracker()
 
 -- ===== 6. ADVANCED PROPERTY EMULATOR (IF SUPPORTED) =====
 -- Uses AddGetHook/AddSetHook/AddPropertyEmulator if available
@@ -16939,7 +16851,6 @@ VisualSection:Toggle({
         Default = false,
         Callback = function(state)
             FlyEnabled = state
-            _G.FlyEnabledForNoclip = state -- Sync with anti-ban hook for noclip bypass
             
             if state then
                 startFly()
@@ -16972,11 +16883,90 @@ VisualSection:Toggle({
         end
     })
 
-    -- === Noclip Bypass (Fly Only) ===
-    -- Uses the anti-ban __newindex hook to block server CFrame changes
-    -- This section just handles CanCollide and sets global flags
+    -- === Noclip Bypass (Fly Only) with Anti-Teleport ===
+    -- Disables collision on character parts while flying + prevents server teleports
+    -- Anti-teleport uses Heartbeat position tracking (standalone, doesn't touch anti-ban hooks)
     local NoclipEnabled = false
     local noclipConnection = nil
+    local antiTeleportConnection = nil
+    
+    -- Anti-teleport state
+    local lastValidPosition = nil
+    local lastPositionTime = 0
+    local TELEPORT_THRESHOLD = 50 -- studs - if moved more than this in one frame, it's a teleport
+    local POSITION_UPDATE_INTERVAL = 0.05 -- How often to update valid position
+    local antiTeleportCooldown = 0 -- Cooldown after restoring position
+    
+    local function startAntiTeleport()
+        if antiTeleportConnection then return end
+        
+        -- Initialize position
+        local char = LocalPlayer.Character
+        if char then
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                lastValidPosition = hrp.Position
+                lastPositionTime = tick()
+            end
+        end
+        
+        antiTeleportConnection = RunService.Heartbeat:Connect(function(dt)
+            -- Only run if noclip AND fly are both enabled
+            if not (NoclipEnabled and FlyEnabled) then return end
+            
+            local character = LocalPlayer.Character
+            if not character then return end
+            
+            local hrp = character:FindFirstChild("HumanoidRootPart")
+            if not hrp then return end
+            
+            -- Cooldown check (don't spam position restoration)
+            if tick() < antiTeleportCooldown then return end
+            
+            local currentPos = hrp.Position
+            
+            -- Check if we have a valid last position
+            if lastValidPosition then
+                local distance = (currentPos - lastValidPosition).Magnitude
+                local timeDelta = tick() - lastPositionTime
+                
+                -- Calculate maximum expected movement (generous to avoid false positives)
+                -- FlySpeed is typically 50-200, plus some buffer
+                local maxExpectedMove = math.max(TELEPORT_THRESHOLD, (FlySpeed or 50) * timeDelta * 2)
+                
+                -- If moved too far too fast, it's likely a server teleport - restore position
+                if distance > maxExpectedMove and timeDelta < 0.5 then
+                    pcall(function()
+                        hrp.CFrame = CFrame.new(lastValidPosition) * (hrp.CFrame - hrp.CFrame.Position)
+                        hrp.Velocity = Vector3.new(0, 0, 0)
+                        if hrp:FindFirstChild("BodyVelocity") then
+                            -- Keep existing fly velocity
+                        else
+                            hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                        end
+                    end)
+                    antiTeleportCooldown = tick() + 0.1 -- Brief cooldown
+                    return -- Don't update position after restoration
+                end
+            end
+            
+            -- Update valid position periodically
+            if tick() - lastPositionTime >= POSITION_UPDATE_INTERVAL then
+                lastValidPosition = currentPos
+                lastPositionTime = tick()
+            end
+        end)
+    end
+    
+    local function stopAntiTeleport()
+        if antiTeleportConnection then
+            antiTeleportConnection:Disconnect()
+            antiTeleportConnection = nil
+        end
+        lastValidPosition = nil
+        lastPositionTime = 0
+        antiTeleportCooldown = 0
+    end
     
     local function startNoclip()
         if noclipConnection then return end -- Already running
@@ -16984,8 +16974,8 @@ VisualSection:Toggle({
         local char = LocalPlayer.Character
         if not char then return end
         
-        -- Enable the noclip bypass in the anti-ban hook
-        _G.NoclipBypassEnabled = true
+        -- Start anti-teleport protection
+        startAntiTeleport()
         
         -- Collision disabling loop
         noclipConnection = RunService.Stepped:Connect(function()
@@ -17010,12 +17000,16 @@ VisualSection:Toggle({
             noclipConnection:Disconnect()
             noclipConnection = nil
         end
-        -- Disable the noclip bypass in the anti-ban hook
-        _G.NoclipBypassEnabled = false
+        stopAntiTeleport()
     end
 
     -- Re-setup on respawn
     LocalPlayer.CharacterAdded:Connect(function(newChar)
+        -- Reset anti-teleport state on respawn
+        lastValidPosition = nil
+        lastPositionTime = 0
+        antiTeleportCooldown = 0
+        
         if NoclipEnabled then
             task.wait(0.2)
             startNoclip()
@@ -17025,7 +17019,7 @@ VisualSection:Toggle({
     local NoclipToggle = ServerModifiersSection:Toggle({
         Title = "Noclip Bypass",
         Flag = "ServerMods_NoclipBypass",
-        Desc = "Walk through walls while flying (enable fly).",
+        Desc = "Walk through walls while flying (enable fly first).",
         Default = false,
         Locked = true, -- Start locked until Fly is enabled
         Callback = function(state)
@@ -17035,7 +17029,7 @@ VisualSection:Toggle({
                 startNoclip()
                 WindUI:Notify({
                     Title = "Server Modifiers",
-                    Content = "Noclip Bypass enabled.",
+                    Content = "Noclip Bypass enabled (with anti-teleport).",
                     Duration = 3,
                     Icon = "ghost",
                 })
