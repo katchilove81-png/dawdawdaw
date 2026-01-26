@@ -16392,7 +16392,7 @@ VisualSection:Toggle({
     local antiBreakBonesEnabled = false
     local antiBreakBonesConnection = nil
     local fallStartTime = nil
-    local FALL_DURATION_THRESHOLD = 0.3 -- seconds of falling before activating fly
+    local FALL_DURATION_THRESHOLD = 0.15 -- seconds of falling before activating fly
     local antiBreakBonesCooldown = false -- Prevent rapid toggling
     
     local function startAntiBreakBones()
@@ -16420,7 +16420,19 @@ VisualSection:Toggle({
             end
             
             local state = humanoid:GetState()
-            local isFalling = (state == Enum.HumanoidStateType.Freefall or state == Enum.HumanoidStateType.FallingDown)
+            -- Detect all falling states including after jumping
+            local isFalling = (state == Enum.HumanoidStateType.Freefall 
+                            or state == Enum.HumanoidStateType.FallingDown)
+            
+            -- Also check vertical velocity as backup detection
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp and not isFalling then
+                local velY = hrp.AssemblyLinearVelocity.Y
+                -- If moving downward fast (more than -20 studs/sec), consider it falling
+                if velY < -20 then
+                    isFalling = true
+                end
+            end
             
             -- Don't interfere if fly is already enabled by user
             if FlyEnabled then
