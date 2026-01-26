@@ -557,11 +557,70 @@ pcall(function()
     end
 end)
 
--- ===== 3. NAMECALL HOOK (SIMPLIFIED PROTECTION) =====
--- Only blocks Kick attempts, does NOT interfere with game remotes
+-- ===== 3. NAMECALL HOOK (ADVANCED PROTECTION) =====
+-- Intercepts all method calls on Roblox instances
+
+local blockedRemotes = {
+    -- Anti-cheat remote names (very specific to avoid blocking game remotes)
+    ["ReportPlayer"] = true,
+    ["BanPlayer"] = true,
+    ["KickPlayer"] = true,
+    ["LogExploit"] = true,
+    ["DetectedCheat"] = true,
+    ["SecurityViolation"] = true,
+    ["AnticheatReport"] = true,
+    ["FlagPlayer"] = true,
+    -- Removed generic names: Violation, Report, Ban, Kick, AdminLog, etc.
+    -- These are too aggressive and block legitimate game functionality
+}
+
+-- Patterns to detect admin logging remotes (partial match)
+-- NOTE: Removed 'log', 'mod', 'ban', 'kick' - too aggressive, blocks game remotes
+local adminLogPatterns = {
+    "anticheat", "cheatdetect", "exploitlog", "securityviolation"
+}
+
+local function isAdminLogRemote(remoteName)
+    if not remoteName or remoteName == "" then return false end
+    local lower = remoteName:lower()
+    for _, pattern in ipairs(adminLogPatterns) do
+        if lower:find(pattern) then
+            return true
+        end
+    end
+    return false
+end
+
+local suspiciousArgs = {
+    "exploit",
+    "cheat",
+    "hack",
+    -- Removed: "speed" - blocks legitimate game tool remotes
+    -- Removed: "teleport" - could block game mechanics
+    "aimbot",
+    -- Removed: "esp" - our script uses this legitimately
+    "godmode",
+    "inject",
+    "executor",
+}
+
+local function containsSuspiciousArg(args)
+    for _, arg in pairs(args) do
+        if type(arg) == "string" then
+            local lowerArg = arg:lower()
+            for _, suspicious in ipairs(suspiciousArgs) do
+                if lowerArg:find(suspicious) then
+                    return true, suspicious
+                end
+            end
+        end
+    end
+    return false
+end
 
 local oldNamecall
 local namecallInHook = false
+local adminLogBlockCount = 0
 
 if hookmetamethod and checkcaller and getnamecallmethod then
     pcall(function()
@@ -571,16 +630,52 @@ if hookmetamethod and checkcaller and getnamecallmethod then
             end
             
             local method = getnamecallmethod()
+            local args = {...}
             
-            -- Only block Kick method on LocalPlayer
+            -- Block Kick method
             if method == "Kick" and self == LocalPlayer then
                 kickBlocked = kickBlocked + 1
                 if ANTIBAN_DEBUG then warn("[ANTI-BAN] Blocked Kick via namecall #" .. kickBlocked) end
                 return nil
             end
             
+            -- Block suspicious remote calls (both from us and anti-cheat)
+            if method == "FireServer" or method == "InvokeServer" then
+                namecallInHook = true
+                local remoteName = ""
+                pcall(function() remoteName = self.Name end)
+                namecallInHook = false
+                
+                -- Block known anti-cheat/admin log remotes (blocks OUTGOING too)
+                if blockedRemotes[remoteName] then
+                    banBlocked = banBlocked + 1
+                    if ANTIBAN_DEBUG then warn("[ANTI-BAN] Blocked suspicious remote: " .. remoteName) end
+                    return nil
+                end
+                
+                -- Pattern-based admin log detection
+                if isAdminLogRemote(remoteName) then
+                    adminLogBlockCount = adminLogBlockCount + 1
+                    if ANTIBAN_DEBUG then warn("[ANTI-BAN] Blocked admin log remote: " .. remoteName .. " (#" .. adminLogBlockCount .. ")") end
+                    return nil
+                end
+                
+                -- Check for suspicious arguments (only when not from us)
+                if not checkcaller() then
+                    local isSuspicious, keyword = containsSuspiciousArg(args)
+                    if isSuspicious then
+                        if ANTIBAN_DEBUG then warn("[ANTI-BAN] Blocked remote with suspicious arg: " .. keyword) end
+                        return nil
+                    end
+                end
+            end
+            
             return oldNamecall(self, ...)
         end) or function(self, ...)
+            if namecallInHook then
+                return oldNamecall(self, ...)
+            end
+            
             local method = getnamecallmethod()
             
             if method == "Kick" and self == LocalPlayer then
@@ -16788,74 +16883,52 @@ VisualSection:Toggle({
         end
     })
 
-    -- === Noclip Bypass (Fly Only) with __newindex CFrame Block ===
-    -- Uses metatable hook to block server CFrame changes on HumanoidRootPart/Torso
+    -- === Noclip Bypass (Fly Only) with Metatable Hook ===
+    -- Uses __newindex hook to block server CFrame changes (proper bypass)
     local NoclipEnabled = false
     local noclipConnection = nil
-    local noclipParts = {} -- Cache character parts for efficiency
-    local noclipAddedConn = nil
+    local noclipMetatableHooked = false
+    local noclipOriginalNewIndex = nil
     
-    -- __newindex hook for blocking server CFrame teleports
-    local noclipNewIndexHooked = false
-    local noclipOldNewIndex = nil
-    
-    local function cacheCharacterParts(char)
-        noclipParts = {}
-        if not char then return end
-        for _, part in pairs(char:GetDescendants()) do
-            if part:IsA("BasePart") then
-                table.insert(noclipParts, part)
-            end
-        end
-    end
-    
-    local function setupNoclipNewIndexHook()
-        if noclipNewIndexHooked then return end
+    -- Setup metatable hook for CFrame blocking (only once)
+    local function setupNoclipMetatableHook()
+        if noclipMetatableHooked then return true end
         
-        pcall(function()
+        -- Check if we have the required functions
+        if not getrawmetatable or not setreadonly or not newcclosure or not checkcaller then
+            return false
+        end
+        
+        local success = pcall(function()
             local Rm = getrawmetatable(game)
-            local Caller = checkcaller or is_protosmasher_caller
-            
-            if not Rm or not setreadonly then return end
-            
+            noclipOriginalNewIndex = Rm.__newindex
             setreadonly(Rm, false)
-            noclipOldNewIndex = Rm.__newindex
             
-            Rm.__newindex = newcclosure and newcclosure(function(self, property, value)
-                -- Only block if we're the caller (not the server) - wait, we want to block server!
-                -- Actually we want to block when NOT our caller (server trying to change CFrame)
-                if Caller and Caller() then 
-                    -- Our script is setting the property, allow it
-                    return noclipOldNewIndex(self, property, value) 
+            Rm.__newindex = newcclosure(function(self, property, value)
+                -- Always allow our own calls
+                if checkcaller() then 
+                    return noclipOriginalNewIndex(self, property, value) 
                 end
                 
-                -- Block server CFrame changes on HumanoidRootPart/Torso when noclip+fly active
+                -- Block CFrame changes to HumanoidRootPart/Torso when noclip + fly enabled
                 if NoclipEnabled and FlyEnabled then
-                    local partName = tostring(self)
-                    if (partName == "HumanoidRootPart" or partName == "Torso") then
+                    if (tostring(self) == "HumanoidRootPart" or tostring(self) == "Torso") then
                         if property == "CFrame" and self:IsDescendantOf(LocalPlayer.Character) then
-                            -- Block the server's CFrame change
-                            return true
+                            return true -- Block the server's CFrame write
                         end
                     end
                 end
                 
-                return noclipOldNewIndex(self, property, value)
-            end) or function(self, property, value)
-                if NoclipEnabled and FlyEnabled then
-                    local partName = tostring(self)
-                    if (partName == "HumanoidRootPart" or partName == "Torso") then
-                        if property == "CFrame" and self:IsDescendantOf(LocalPlayer.Character) then
-                            return true
-                        end
-                    end
-                end
-                return noclipOldNewIndex(self, property, value)
-            end
+                return noclipOriginalNewIndex(self, property, value)
+            end)
             
             setreadonly(Rm, true)
-            noclipNewIndexHooked = true
         end)
+        
+        if success then
+            noclipMetatableHooked = true
+        end
+        return success
     end
     
     local function startNoclip()
@@ -16864,51 +16937,40 @@ VisualSection:Toggle({
         local char = LocalPlayer.Character
         if not char then return end
         
-        cacheCharacterParts(char)
+        -- Setup metatable hook if not already done
+        setupNoclipMetatableHook()
         
-        -- Listen for new parts added to character
-        noclipAddedConn = char.DescendantAdded:Connect(function(part)
-            if part:IsA("BasePart") then
-                table.insert(noclipParts, part)
-            end
-        end)
-        
-        -- Setup the __newindex hook for CFrame blocking
-        setupNoclipNewIndexHook()
-        
+        -- Collision disabling loop
         noclipConnection = RunService.Stepped:Connect(function()
-            -- Only apply noclip when both noclip is enabled AND fly is active
             if NoclipEnabled and FlyEnabled then
-                for i = #noclipParts, 1, -1 do
-                    local part = noclipParts[i]
-                    if part and part.Parent then
-                        part.CanCollide = false
-                    else
-                        table.remove(noclipParts, i) -- Clean up destroyed parts
-                    end
+                local character = LocalPlayer.Character
+                if character then
+                    pcall(function()
+                        local head = character:FindFirstChild("Head")
+                        local torso = character:FindFirstChild("Torso") or character:FindFirstChild("UpperTorso")
+                        local hrp = character:FindFirstChild("HumanoidRootPart")
+                        if head then head.CanCollide = false end
+                        if torso then torso.CanCollide = false end
+                        if hrp then hrp.CanCollide = false end
+                    end)
                 end
             end
         end)
     end
 
     local function stopNoclip()
-        if noclipAddedConn then
-            noclipAddedConn:Disconnect()
-            noclipAddedConn = nil
-        end
         if noclipConnection then
             noclipConnection:Disconnect()
             noclipConnection = nil
         end
-        -- Note: We don't unhook __newindex because it's shared and checked via NoclipEnabled flag
-        noclipParts = {}
+        -- Note: We don't unhook the metatable as it's designed to only block when NoclipEnabled is true
     end
 
-    -- Re-cache parts on respawn
+    -- Re-setup on respawn
     LocalPlayer.CharacterAdded:Connect(function(newChar)
         if NoclipEnabled then
             task.wait(0.2)
-            cacheCharacterParts(newChar)
+            startNoclip()
         end
     end)
 
