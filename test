@@ -809,13 +809,13 @@ if hookmetamethod and checkcaller then
                     if key == "WalkSpeed" and value == 0 then
                         if ANTIBAN_DEBUG then warn("[ANTI-BAN] Blocked WalkSpeed = 0 attempt") end
                         newIndexInHook = false
-                        return nil
+                        return -- Return nothing to silently block
                     end
                     -- Block attempts to anchor our character
                     if key == "Anchored" and value == true then
                         if ANTIBAN_DEBUG then warn("[ANTI-BAN] Blocked Anchored = true attempt") end
                         newIndexInHook = false
-                        return nil
+                        return -- Return nothing to silently block
                     end
                     
                     -- === NOCLIP BYPASS: Block server CFrame teleports ===
@@ -824,7 +824,7 @@ if hookmetamethod and checkcaller then
                         if (partName == "HumanoidRootPart" or partName == "Torso") and key == "CFrame" then
                             if ANTIBAN_DEBUG then warn("[ANTI-BAN] Blocked CFrame teleport on " .. partName) end
                             newIndexInHook = false
-                            return true -- Block the server's CFrame write
+                            return -- Return nothing to silently block the server's CFrame write
                         end
                     end
                 end
