@@ -793,6 +793,17 @@ local newIndexInHook = false
 
 -- Global flag for noclip bypass (set by noclip toggle, checked by hook)
 _G.NoclipBypassEnabled = false
+-- Store last valid position for noclip (fallback restoration)
+_G.NoclipLastValidPosition = nil
+
+-- Parts to block CFrame changes on for noclip
+local NOCLIP_BLOCKED_PARTS = {
+    ["HumanoidRootPart"] = true,
+    ["Torso"] = true,
+    ["UpperTorso"] = true,
+    ["LowerTorso"] = true,
+    ["Head"] = true,
+}
 
 if hookmetamethod and checkcaller then
     pcall(function()
@@ -803,17 +814,26 @@ if hookmetamethod and checkcaller then
             
             -- Noclip CFrame bypass - block server teleports when enabled
             -- This runs for ALL callers (including server) when noclip is on
-            if _G.NoclipBypassEnabled and key == "CFrame" then
-                local selfName = ""
-                pcall(function() selfName = self.Name end)
-                if selfName == "HumanoidRootPart" or selfName == "Torso" or selfName == "UpperTorso" then
-                    local char = LocalPlayer and LocalPlayer.Character
-                    if char then
-                        local isOurs = false
-                        pcall(function() isOurs = self:IsDescendantOf(char) end)
-                        if isOurs then
-                            -- Block the CFrame change (server trying to teleport us back)
-                            return true
+            if _G.NoclipBypassEnabled then
+                if key == "CFrame" or key == "Position" then
+                    local selfName = ""
+                    local selfClass = ""
+                    pcall(function() selfName = self.Name end)
+                    pcall(function() selfClass = self.ClassName end)
+                    
+                    -- Check if it's a character part we want to block
+                    if NOCLIP_BLOCKED_PARTS[selfName] or selfClass == "BasePart" then
+                        local char = LocalPlayer and LocalPlayer.Character
+                        if char then
+                            local isOurs = false
+                            pcall(function() isOurs = self:IsDescendantOf(char) end)
+                            if isOurs then
+                                -- Only block if the caller is NOT us (i.e., server trying to teleport)
+                                if not checkcaller() then
+                                    -- Block the CFrame/Position change (server trying to teleport us back)
+                                    return true
+                                end
+                            end
                         end
                     end
                 end
@@ -845,16 +865,18 @@ if hookmetamethod and checkcaller then
             return oldNewIndex(self, key, value)
         end) or function(self, key, value)
             -- Fallback: still support noclip bypass
-            if _G.NoclipBypassEnabled and key == "CFrame" then
-                local selfName = ""
-                pcall(function() selfName = self.Name end)
-                if selfName == "HumanoidRootPart" or selfName == "Torso" or selfName == "UpperTorso" then
-                    local char = LocalPlayer and LocalPlayer.Character
-                    if char then
-                        local isOurs = false
-                        pcall(function() isOurs = self:IsDescendantOf(char) end)
-                        if isOurs then
-                            return true
+            if _G.NoclipBypassEnabled then
+                if key == "CFrame" or key == "Position" then
+                    local selfName = ""
+                    pcall(function() selfName = self.Name end)
+                    if NOCLIP_BLOCKED_PARTS[selfName] then
+                        local char = LocalPlayer and LocalPlayer.Character
+                        if char then
+                            local isOurs = false
+                            pcall(function() isOurs = self:IsDescendantOf(char) end)
+                            if isOurs then
+                                return true
+                            end
                         end
                     end
                 end
@@ -1871,7 +1893,7 @@ local Window = WindUI:CreateWindow({
 
     InfoSection:Paragraph({
         Title = "Changelogs",
-        Desc = "Features\n- Added Fly Noclip Bypass!\n\nFixes\n- Improved And Optimized Berezina Map Hack\n- Fixed Minor Bugs",
+        Desc = "Features\n- Added Fly Noclip Bypass!\n- Added Auto Jump Cooldown!\n\nFixes\n- Improved And Optimized Berezina Map Hack\n- Fixed Minor Bugs",
     })
 
 -- Make sure this exists somewhere near the top of your script
@@ -2495,7 +2517,7 @@ _G.KatchiToggles.HeadHit = {
                 -- === Jump Height Simulation (Velocity-based) ===
                 -- Physics formula: v = sqrt(2 * g * h) where g = workspace.Gravity, h = jump height
                 local gravity = workspace.Gravity
-                local jumpHeight = AutoJumpHeight or 7.2
+                local jumpHeight = AutoJumpHeight or 3.5
                 local jumpVelocity = math.sqrt(2 * gravity * jumpHeight)
                 
                 local character = LocalPlayer.Character
@@ -2628,7 +2650,7 @@ _G.KatchiToggles.HeadHit = {
         Flag = "Legit_JumpHeight",
         Desc = "Adjust the height of auto jump",
         Step = 0.1,
-        Value = { Min = 1, Max = 50, Default = 7.2 },
+        Value = { Min = 1, Max = 10, Default = 3.5 },
         Callback = function(value)
             AutoJumpHeight = value
         end
@@ -9876,63 +9898,152 @@ do -- // Sapper Section in Classes Tab
     local Players = game:GetService("Players")
     local LocalPlayer = Players.LocalPlayer
     local Workspace = game:GetService("Workspace")
+    local RunService = game:GetService("RunService")
     
     local AutoRepairEnabled = false
-    local AutoRepairCooldown = 0.1
-
-    local function FireRepair(buildHealth)
+    local AutoRepairConn = nil
+    local AutoRepairRange = 25 -- Range to search for buildable structures
+    local AutoRepairCooldown = 0.15 -- Throttle interval
+    
+    -- Helper: Find hammer from backpack or character (no need to equip)
+    local function getHammerRemote()
         local char = LocalPlayer.Character
-        if not (char and buildHealth) then return end
-
-        local hammer = char:FindFirstChild("Hammer")
-        if not hammer or not hammer:FindFirstChild("RemoteEvent") then return end
-
-        local args = {"Repair", buildHealth}
-        pcall(function()
-            _G.SafeFireServer(hammer.RemoteEvent, unpack(args))
-        end)
+        if not char then return nil end
+        
+        -- Check backpack first, then character
+        local hammer = LocalPlayer.Backpack:FindFirstChild("Hammer") 
+            or LocalPlayer.Backpack:FindFirstChild("Claw Hammer")
+            or char:FindFirstChild("Hammer")
+            or char:FindFirstChild("Claw Hammer")
+        
+        if hammer and hammer:FindFirstChild("RemoteEvent") then
+            return hammer.RemoteEvent
+        end
+        return nil
     end
-
-    local function GetLookedStructure()
-        local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        if not hrp then return nil end
-
-        local origin = Workspace.CurrentCamera.CFrame.Position
-        local direction = Workspace.CurrentCamera.CFrame.LookVector * 50
-
-        local params = RaycastParams.new()
-        params.FilterDescendantsInstances = {LocalPlayer.Character}
-        params.FilterType = Enum.RaycastFilterType.Blacklist
-
-        local rayResult = Workspace:Raycast(origin, direction, params)
-        if not rayResult or not rayResult.Instance then return nil end
-
-        local hit = rayResult.Instance
-        local model = hit:FindFirstAncestorOfClass("Model")
-        if not model then return nil end
-
-        local buildHealth = model:FindFirstChild("BuildingHealth") or (model.Parent and model.Parent:FindFirstChild("BuildingHealth"))
-        return buildHealth
-    end
-
-    task.defer(function()
-        task.wait(2.5) -- Stagger start
-        while true do
-            task.wait(AutoRepairCooldown)
-            if AutoRepairEnabled then
-                local buildHealth = GetLookedStructure()
-                if buildHealth then
-                    local currentHealth = buildHealth.Value
-                    local maxHealth = buildHealth:GetAttribute("MaxHealth")
-
-                    if maxHealth and currentHealth < maxHealth then
-                        FireRepair(buildHealth)
+    
+    -- Helper: Get all nearby buildable structures (BuildingHealth or ConstructHealth)
+    local function getNearbyBuildables()
+        local char = LocalPlayer.Character
+        if not char then return {} end
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if not root then return {} end
+        local rootPos = root.Position
+        
+        local buildables = {}
+        local rangeSq = AutoRepairRange * AutoRepairRange
+        
+        -- Scan workspace for buildable structures
+        -- Check common locations: Stakes, Barricades, Buildings, etc.
+        local function checkInstance(inst)
+            if not inst then return end
+            
+            -- Check for BuildingHealth (barricades, stakes, structures)
+            local buildHealth = inst:FindFirstChild("BuildingHealth")
+            if buildHealth then
+                local pos = nil
+                if inst:IsA("BasePart") then
+                    pos = inst.Position
+                elseif inst:IsA("Model") then
+                    local primary = inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart")
+                    if primary then pos = primary.Position end
+                end
+                
+                if pos then
+                    local distSq = (pos - rootPos).Magnitude ^ 2
+                    if distSq <= rangeSq then
+                        local currentHealth = buildHealth.Value
+                        local maxHealth = buildHealth:GetAttribute("MaxHealth")
+                        -- Only add if needs repair/building
+                        if maxHealth and currentHealth < maxHealth then
+                            table.insert(buildables, buildHealth)
+                        end
+                    end
+                end
+            end
+            
+            -- Check for ConstructHealth (bridge parts, etc.)
+            local constructHealth = inst:FindFirstChild("ConstructHealth")
+            if constructHealth then
+                local pos = nil
+                if inst:IsA("BasePart") then
+                    pos = inst.Position
+                elseif inst:IsA("Model") then
+                    local primary = inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart")
+                    if primary then pos = primary.Position end
+                end
+                
+                if pos then
+                    local distSq = (pos - rootPos).Magnitude ^ 2
+                    if distSq <= rangeSq then
+                        table.insert(buildables, constructHealth)
                     end
                 end
             end
         end
-    end)
-
+        
+        -- Search in common buildable containers
+        local buildablesFolder = Workspace:FindFirstChild("Buildables")
+        if buildablesFolder then
+            for _, child in pairs(buildablesFolder:GetDescendants()) do
+                checkInstance(child)
+            end
+        end
+        
+        -- Search in Stakes folder
+        local stakesFolder = Workspace:FindFirstChild("Stakes")
+        if stakesFolder then
+            for _, child in pairs(stakesFolder:GetDescendants()) do
+                checkInstance(child)
+            end
+        end
+        
+        -- Search in Barricades folder
+        local barricadesFolder = Workspace:FindFirstChild("Barricades")
+        if barricadesFolder then
+            for _, child in pairs(barricadesFolder:GetDescendants()) do
+                checkInstance(child)
+            end
+        end
+        
+        -- Search in map-specific folders (Berezina, etc.)
+        for _, mapFolder in pairs(Workspace:GetChildren()) do
+            if mapFolder:IsA("Folder") or mapFolder:IsA("Model") then
+                local modes = mapFolder:FindFirstChild("Modes")
+                if modes then
+                    for _, modeChild in pairs(modes:GetDescendants()) do
+                        checkInstance(modeChild)
+                    end
+                end
+            end
+        end
+        
+        -- Also search root workspace for loose buildables
+        for _, child in pairs(Workspace:GetChildren()) do
+            if child:IsA("Model") then
+                checkInstance(child)
+            end
+        end
+        
+        return buildables
+    end
+    
+    -- Main repair function - repairs all nearby structures
+    local function doAutoRepair()
+        local hammerRemote = getHammerRemote()
+        if not hammerRemote then return end
+        
+        local buildables = getNearbyBuildables()
+        
+        for _, healthValue in ipairs(buildables) do
+            pcall(function()
+                _G.SafeFireServer(hammerRemote, "Repair", healthValue)
+            end)
+        end
+    end
+    
+    local autoRepairTicker = 0
+    
     SapperSection:Toggle({
         Title = "Auto Repair",
         Flag = "Classes_3",
@@ -9940,12 +10051,34 @@ do -- // Sapper Section in Classes Tab
         Default = false,
         Callback = function(state)
             AutoRepairEnabled = state
-            WindUI:Notify({
-                Title = "Auto Repair",
-                Content = state and "Auto Repair enabled" or "Auto Repair disabled",
-                Duration = 2,
-                Icon = state and "wrench" or "x",
-            })
+            if state then
+                if AutoRepairConn then AutoRepairConn:Disconnect() end
+                autoRepairTicker = 0
+                AutoRepairConn = RunService.Heartbeat:Connect(function(dt)
+                    if not AutoRepairEnabled then return end
+                    autoRepairTicker = autoRepairTicker + (dt or 0)
+                    if autoRepairTicker < AutoRepairCooldown then return end
+                    autoRepairTicker = 0
+                    doAutoRepair()
+                end)
+                WindUI:Notify({
+                    Title = "Auto Repair",
+                    Content = "Auto Repair enabled",
+                    Duration = 2,
+                    Icon = "wrench",
+                })
+            else
+                if AutoRepairConn then
+                    AutoRepairConn:Disconnect()
+                    AutoRepairConn = nil
+                end
+                WindUI:Notify({
+                    Title = "Auto Repair",
+                    Content = "Auto Repair disabled",
+                    Duration = 2,
+                    Icon = "x",
+                })
+            end
         end
     })
 end -- end of Sapper Section in Classes Tab
@@ -16782,6 +16915,20 @@ VisualSection:Toggle({
     -- Based on zxciaz's bypass method - blocks CFrame changes to HumanoidRootPart/Torso
     local NoclipEnabled = false
     local noclipConnection = nil
+    local noclipPositionTracker = nil
+    
+    -- All parts that need collision disabled (R6 + R15 compatible)
+    local NOCLIP_PARTS = {
+        "Head", "Torso", "HumanoidRootPart",
+        -- R15 parts
+        "UpperTorso", "LowerTorso",
+        "LeftUpperArm", "LeftLowerArm", "LeftHand",
+        "RightUpperArm", "RightLowerArm", "RightHand",
+        "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
+        "RightUpperLeg", "RightLowerLeg", "RightFoot",
+        -- R6 parts
+        "Left Arm", "Right Arm", "Left Leg", "Right Leg",
+    }
     
     local function startNoclip()
         if noclipConnection then return end -- Already running
@@ -16792,19 +16939,47 @@ VisualSection:Toggle({
         -- Enable the hook-based CFrame bypass
         _G.NoclipBypassEnabled = true
         
-        -- Collision disabling loop (Stepped for responsiveness)
+        -- Store initial position for fallback
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            _G.NoclipLastValidPosition = hrp.Position
+        end
+        
+        -- Position tracker - stores last valid position periodically for restoration
+        noclipPositionTracker = RunService.Heartbeat:Connect(function()
+            if NoclipEnabled and FlyEnabled then
+                local character = LocalPlayer.Character
+                if character then
+                    local root = character:FindFirstChild("HumanoidRootPart")
+                    if root then
+                        _G.NoclipLastValidPosition = root.Position
+                    end
+                end
+            end
+        end)
+        
+        -- Collision disabling loop (Stepped for high responsiveness)
         noclipConnection = RunService.Stepped:Connect(function()
             if NoclipEnabled and FlyEnabled then
                 local character = LocalPlayer.Character
                 if character then
-                    pcall(function()
-                        local head = character:FindFirstChild("Head")
-                        local torso = character:FindFirstChild("Torso") or character:FindFirstChild("UpperTorso")
-                        local hrp = character:FindFirstChild("HumanoidRootPart")
-                        if head then head.CanCollide = false end
-                        if torso then torso.CanCollide = false end
-                        if hrp then hrp.CanCollide = false end
-                    end)
+                    -- Disable collision on ALL character parts
+                    for _, partName in ipairs(NOCLIP_PARTS) do
+                        local part = character:FindFirstChild(partName)
+                        if part and part:IsA("BasePart") then
+                            pcall(function() part.CanCollide = false end)
+                        end
+                    end
+                    
+                    -- Also disable collision on any accessories/hats
+                    for _, child in pairs(character:GetChildren()) do
+                        if child:IsA("Accessory") or child:IsA("Hat") then
+                            local handle = child:FindFirstChild("Handle")
+                            if handle then
+                                pcall(function() handle.CanCollide = false end)
+                            end
+                        end
+                    end
                 end
             end
         end)
@@ -16813,6 +16988,12 @@ VisualSection:Toggle({
     local function stopNoclip()
         -- Disable the hook-based CFrame bypass
         _G.NoclipBypassEnabled = false
+        _G.NoclipLastValidPosition = nil
+        
+        if noclipPositionTracker then
+            noclipPositionTracker:Disconnect()
+            noclipPositionTracker = nil
+        end
         
         if noclipConnection then
             noclipConnection:Disconnect()
@@ -16823,7 +17004,7 @@ VisualSection:Toggle({
     -- Re-setup on respawn
     LocalPlayer.CharacterAdded:Connect(function(newChar)
         if NoclipEnabled and FlyEnabled then
-            task.wait(0.2)
+            task.wait(0.3)
             startNoclip()
         end
     end)
@@ -18777,6 +18958,7 @@ do -- // Changelog Popup UI
             date = "January 2026",
             changes = {
                 {type = "feature", text = "Added Fly Noclip Bypass!"},
+                {type = "feature", text = "Added Auto Jump Cooldown!"},
                 {type = "fix", text = "Improved And Optimized Berezina Map Hack"},
                 {type = "fix", text = "Fixed Minor Bugs"},
             }
