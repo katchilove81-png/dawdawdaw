@@ -16383,23 +16383,62 @@ local originalFieldOfView = nil
 local fovChangerEnabled = false
 local currentFOV = 70
 local fovLockConnection = nil
+local fovCameraConnection = nil
+local fovPropertyConnection = nil
 
 pcall(function()
     originalFieldOfView = workspace.CurrentCamera.FieldOfView
 end)
 
+-- Force FOV on the current camera
+local function forceFOV()
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        if cam then
+            cam.FieldOfView = currentFOV
+        end
+    end)
+end
+
+-- Hook into camera's FieldOfView property changes
+local function hookCameraFOV()
+    if fovPropertyConnection then 
+        pcall(function() fovPropertyConnection:Disconnect() end)
+    end
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        if cam then
+            fovPropertyConnection = cam:GetPropertyChangedSignal("FieldOfView"):Connect(function()
+                if fovChangerEnabled and cam.FieldOfView ~= currentFOV then
+                    cam.FieldOfView = currentFOV
+                end
+            end)
+        end
+    end)
+end
+
 -- Force FOV every frame to prevent game from overriding it
 local function startFOVLock()
     if fovLockConnection then fovLockConnection:Disconnect() end
+    if fovCameraConnection then fovCameraConnection:Disconnect() end
+    
+    -- Hook current camera
+    hookCameraFOV()
+    
+    -- Listen for camera changes (game might swap cameras)
+    fovCameraConnection = workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+        if fovChangerEnabled then
+            task.defer(function()
+                forceFOV()
+                hookCameraFOV()
+            end)
+        end
+    end)
+    
+    -- Also force every frame as backup
     fovLockConnection = RunService.RenderStepped:Connect(function()
         if not fovChangerEnabled then return end
-        pcall(function()
-            local cam = workspace.CurrentCamera
-            if cam then
-                -- Always force set FOV every frame to prevent any game override
-                cam.FieldOfView = currentFOV
-            end
-        end)
+        forceFOV()
     end)
 end
 
@@ -16407,6 +16446,14 @@ local function stopFOVLock()
     if fovLockConnection then
         fovLockConnection:Disconnect()
         fovLockConnection = nil
+    end
+    if fovCameraConnection then
+        fovCameraConnection:Disconnect()
+        fovCameraConnection = nil
+    end
+    if fovPropertyConnection then
+        pcall(function() fovPropertyConnection:Disconnect() end)
+        fovPropertyConnection = nil
     end
 end
 
@@ -16425,8 +16472,15 @@ end
 -- Re-apply FOV on respawn (camera gets recreated)
 LocalPlayer.CharacterAdded:Connect(function()
     if fovChangerEnabled then
+        task.delay(0.1, function()
+            forceFOV()
+            hookCameraFOV()
+        end)
         task.delay(0.5, function()
-            applyFOV(currentFOV)
+            forceFOV()
+        end)
+        task.delay(1, function()
+            forceFOV()
         end)
     end
 end)
@@ -16434,7 +16488,7 @@ end)
 VisualSection:Toggle({
     Title = "FOV Changer",
     Flag = "Visual_FOVChanger",
-    Desc = "Change your camera field of view (locked - game can't reset it)",
+    Desc = "Change your camera field of view",
     Default = false,
     Callback = function(state)
         fovChangerEnabled = state
