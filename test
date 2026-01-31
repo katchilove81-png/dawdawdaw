@@ -18743,156 +18743,9 @@ do -- // Keybinds and UI Tab
         Title = "How to use",
         Desc = "Click An Keybind Button And Bind A Key, On Mobile Ui Click The Toggle And A Ui Will Pop Up And You Can Use It To Toggle While Not In The Ui, Hold the button if you want to see the settings."
     })
-    
-    -- ===== RONIX KEYBIND FALLBACK =====
-    -- Some executors don't support WindUI's Keybind properly, this is a manual fallback
-    -- This reads the configured keybinds from the UI and listens for keypresses manually
-    local RonixKeybindEnabled = false
-    local RonixKeybindConnection = nil
-    
-    -- Store keybind element references (will be populated as keybinds are created)
-    local KeybindElements = {}
-    
-    -- Store the actual keybind values (KeyCode) directly when user sets them
-    local KeybindValues = {}
-    
-    -- Map flag names to toggle names and state getters
-    local KeybindFlagToToggle = {
-        ["Keybind_HeadHit"] = {"HeadHit", function() return HeadHitEnabled end},
-        ["Keybind_AutoJump"] = {"AutoJump", function() return LocalPlayer:GetAttribute("AutoJumpEnabled") or false end},
-        ["Keybind_HitboxExpander"] = {"HitboxExpander", function() return hitboxEnabled end},
-        ["Keybind_ShoveHitbox"] = {"ShoveHitbox", function() return ShoveHitboxExpanderEnabled end},
-        ["Keybind_AutoParrySapper"] = {"AutoParrySapper", function() return AutoParrySapperMeleeEnabled end},
-        ["Keybind_AutoShoot"] = {"AutoShoot", function() return USER_AUTO_SHOOT_TOGGLE end},
-        ["Keybind_InstantShoot"] = {"InstantShoot", function() return INSTANT_SHOOT_ENABLED end},
-        ["Keybind_UseFov"] = {"UseFov", function() return USE_FOV end},
-        ["Keybind_ShowFov"] = {"ShowFov", function() return SHOW_FOV end},
-        ["Keybind_WallCheck"] = {"WallCheck", function() return CHECK_WALLS end},
-        ["Keybind_AutoReload"] = {"AutoReload", function() return AUTO_RELOAD_ENABLED end},
-        ["Keybind_AutoSavePlayers"] = {"AutoSavePlayers", function() return AUTO_SAVE_PLAYERS_ENABLED end},
-        ["Keybind_KillAura"] = {"KillAura", function() return KillAuraEnabled end},
-        ["Keybind_Reach"] = {"Reach", function() return KillAura_HitboxExpanderEnabled end},
-        ["Keybind_AutoEquipMelee"] = {"AutoEquipMelee", function() return KillAura_AutoEquipMelee end},
-        ["Keybind_BayonetKillAura"] = {"BayonetKillAura", function() return KillAura_EnableBayonet end},
-        ["Keybind_AutoLook"] = {"AutoLook", function() return KillAuraAutoLook end},
-        ["Keybind_ShoveAura"] = {"ShoveAura", function() return ShoveAuraEnabled end},
-        ["Keybind_Fly"] = {"Fly", function() return FlyEnabled end},
-        ["Keybind_Noclip"] = {"NoclipBypass", function() return NoclipEnabled end},
-        ["Keybind_ApplyWalkSpeed"] = {"ApplyWalkSpeed", function() return walkLoopEnabled end},
-        ["Keybind_AutoRemoveHorses"] = {"AutoRemoveHorses", function() return AutoRemoveHorsesEnabled end},
-        ["Keybind_NoFallDamage"] = {"NoFallDamage", function() return noFallDamageEnabled end},
-    }
-    
-    -- Helper: Create a keybind with callback that also stores the value for Ronix fallback
-    local function createKeybindWithFallback(flagName, keybindConfig)
-        local originalCallback = keybindConfig.Callback
-        keybindConfig.Callback = function(keyName)
-            -- Store the KeyCode for Ronix fallback
-            if keyName and keyName ~= "" then
-                pcall(function()
-                    KeybindValues[flagName] = Enum.KeyCode[keyName]
-                end)
-            else
-                KeybindValues[flagName] = nil
-            end
-            -- Call original callback
-            if originalCallback then
-                originalCallback(keyName)
-            end
-        end
-        return KeybindsSection:Keybind(keybindConfig)
-    end
-    
-    local function startRonixKeybind()
-        if RonixKeybindConnection then return end
-        
-        RonixKeybindConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
-            if gameProcessed then return end
-            if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
-            
-            local pressedKey = input.KeyCode
-            
-            -- Check each stored keybind value
-            for flagName, keyCode in pairs(KeybindValues) do
-                if keyCode and keyCode == pressedKey then
-                    -- Found a match! Trigger the toggle
-                    local mapping = KeybindFlagToToggle[flagName]
-                    if mapping then
-                        local toggleName = mapping[1]
-                        local currentState = mapping[2]()
-                        local newState = not currentState
-                        local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements[toggleName]
-                        
-                        if toggle then
-                            -- Try multiple methods for compatibility with different executors
-                            local success = false
-                            
-                            -- Method 1: Try Set (WindUI standard)
-                            if not success and toggle.Set then
-                                success = pcall(function() toggle:Set(newState) end)
-                            end
-                            
-                            -- Method 2: Try Enable/Disable (Ronix compatible)
-                            if not success then
-                                if newState and toggle.Enable then
-                                    success = pcall(function() toggle:Enable() end)
-                                elseif not newState and toggle.Disable then
-                                    success = pcall(function() toggle:Disable() end)
-                                end
-                            end
-                            
-                            -- Method 3: Try Toggle method
-                            if not success and toggle.Toggle then
-                                success = pcall(function() toggle:Toggle() end)
-                            end
-                            
-                            -- Method 4: Try clicking/firing the toggle directly
-                            if not success and toggle.Callback then
-                                success = pcall(function() toggle.Callback(newState) end)
-                            end
-                        end
-                    end
-                end
-            end
-        end)
-    end
-    
-    local function stopRonixKeybind()
-        if RonixKeybindConnection then
-            RonixKeybindConnection:Disconnect()
-            RonixKeybindConnection = nil
-        end
-    end
-    
-    KeybindsSection:Toggle({
-        Title = "Keybind for Ronix (Fallback)",
-        Flag = "Keybind_RonixFallback",
-        Desc = "Enable this if your executor's keybinds don't work. Uses the same keybinds you set below.",
-        Default = false,
-        Callback = function(v)
-            RonixKeybindEnabled = v
-            if v then
-                startRonixKeybind()
-                WindUI:Notify({
-                    Title = "Ronix Keybind",
-                    Content = "Fallback keybinds enabled - uses your configured keybinds",
-                    Duration = 3,
-                    Icon = "keyboard"
-                })
-            else
-                stopRonixKeybind()
-                WindUI:Notify({
-                    Title = "Ronix Keybind",
-                    Content = "Fallback keybinds disabled",
-                    Duration = 2,
-                    Icon = "keyboard-off"
-                })
-            end
-        end
-    })
 
     -- Head Hit Keybind
-    KeybindElements["Keybind_HeadHit"] = createKeybindWithFallback("Keybind_HeadHit", {
+    KeybindsSection:Keybind({
         Title = "Head Hit",
         Flag = "Keybind_HeadHit",
         Desc = "Toggle Head Hit feature",
@@ -18900,8 +18753,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.HeadHit
-                if toggle and toggle.Set then
-                    toggle:Set(not HeadHitEnabled)
+                if toggle then
+                    if HeadHitEnabled then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -18921,7 +18778,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Auto Jump Keybind
-    KeybindElements["Keybind_AutoJump"] = createKeybindWithFallback("Keybind_AutoJump", {
+    KeybindsSection:Keybind({
         Title = "Auto Jump",
         Flag = "Keybind_AutoJump",
         Desc = "Toggle Auto Jump feature",
@@ -18929,10 +18786,14 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.AutoJump
-                if toggle and toggle.Set then
+                if toggle then
                     local LocalPlayer = game:GetService("Players").LocalPlayer
                     local currentState = LocalPlayer:GetAttribute("AutoJumpEnabled") or false
-                    toggle:Set(not currentState)
+                    if currentState then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -18954,7 +18815,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Hitbox Expander Keybind
-    KeybindElements["Keybind_HitboxExpander"] = createKeybindWithFallback("Keybind_HitboxExpander", {
+    KeybindsSection:Keybind({
         Title = "Hitbox Expander",
         Flag = "Keybind_HitboxExpander",
         Desc = "Toggle Hitbox Expander feature",
@@ -18962,8 +18823,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.HitboxExpander
-                if toggle and toggle.Set then
-                    toggle:Set(not hitboxEnabled)
+                if toggle then
+                    if hitboxEnabled then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -18983,7 +18848,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Shove Hitbox Expander Keybind
-    KeybindElements["Keybind_ShoveHitbox"] = createKeybindWithFallback("Keybind_ShoveHitbox", {
+    KeybindsSection:Keybind({
         Title = "Shove Hitbox Expander",
         Flag = "Keybind_ShoveHitbox",
         Desc = "Toggle Shove Hitbox Expander feature",
@@ -18991,8 +18856,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.ShoveHitbox
-                if toggle and toggle.Set then
-                    toggle:Set(not ShoveHitboxExpanderEnabled)
+                if toggle then
+                    if ShoveHitboxExpanderEnabled then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -19012,7 +18881,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Auto Parry Sapper Keybind
-    KeybindElements["Keybind_AutoParrySapper"] = createKeybindWithFallback("Keybind_AutoParrySapper", {
+    KeybindsSection:Keybind({
         Title = "Auto Parry Sapper",
         Flag = "Keybind_AutoParrySapper",
         Desc = "Toggle Auto Parry Sapper feature",
@@ -19020,8 +18889,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.AutoParrySapper
-                if toggle and toggle.Set then
-                    toggle:Set(not AutoParrySapperMeleeEnabled)
+                if toggle then
+                    if AutoParrySapperMeleeEnabled then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -19041,7 +18914,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Enable Auto Shoot Keybind
-    KeybindElements["Keybind_AutoShoot"] = createKeybindWithFallback("Keybind_AutoShoot", {
+    KeybindsSection:Keybind({
         Title = "Auto Shoot",
         Flag = "Keybind_AutoShoot",
         Desc = "Toggle Auto Shoot feature",
@@ -19049,8 +18922,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.AutoShoot
-                if toggle and toggle.Set then
-                    toggle:Set(not USER_AUTO_SHOOT_TOGGLE)
+                if toggle then
+                    if USER_AUTO_SHOOT_TOGGLE then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -19070,7 +18947,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Instant Shoot Keybind
-    KeybindElements["Keybind_InstantShoot"] = createKeybindWithFallback("Keybind_InstantShoot", {
+    KeybindsSection:Keybind({
         Title = "Instant Shoot",
         Flag = "Keybind_InstantShoot",
         Desc = "Toggle Instant Shoot feature",
@@ -19078,8 +18955,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.InstantShoot
-                if toggle and toggle.Set then
-                    toggle:Set(not INSTANT_SHOOT_ENABLED)
+                if toggle then
+                    if INSTANT_SHOOT_ENABLED then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -19099,7 +18980,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Use FOV Keybind
-    KeybindElements["Keybind_UseFov"] = createKeybindWithFallback("Keybind_UseFov", {
+    KeybindsSection:Keybind({
         Title = "Use FOV",
         Flag = "Keybind_UseFov",
         Desc = "Toggle Use FOV feature",
@@ -19107,8 +18988,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.UseFov
-                if toggle and toggle.Set then
-                    toggle:Set(not USE_FOV)
+                if toggle then
+                    if USE_FOV then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -19128,7 +19013,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Show FOV Keybind
-    KeybindElements["Keybind_ShowFov"] = createKeybindWithFallback("Keybind_ShowFov", {
+    KeybindsSection:Keybind({
         Title = "Show FOV",
         Flag = "Keybind_ShowFov",
         Desc = "Toggle Show FOV feature",
@@ -19136,8 +19021,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.ShowFov
-                if toggle and toggle.Set then
-                    toggle:Set(not SHOW_FOV)
+                if toggle then
+                    if SHOW_FOV then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -19157,7 +19046,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Wall Check Keybind
-    KeybindElements["Keybind_WallCheck"] = createKeybindWithFallback("Keybind_WallCheck", {
+    KeybindsSection:Keybind({
         Title = "Wall Check",
         Flag = "Keybind_WallCheck",
         Desc = "Toggle Wall Check feature",
@@ -19165,8 +19054,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.WallCheck
-                if toggle and toggle.Set then
-                    toggle:Set(not CHECK_WALLS)
+                if toggle then
+                    if CHECK_WALLS then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -19186,7 +19079,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Auto Reload Keybind
-    KeybindElements["Keybind_AutoReload"] = createKeybindWithFallback("Keybind_AutoReload", {
+    KeybindsSection:Keybind({
         Title = "Auto Reload",
         Flag = "Keybind_AutoReload",
         Desc = "Toggle Auto Reload feature",
@@ -19194,8 +19087,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.AutoReload
-                if toggle and toggle.Set then
-                    toggle:Set(not AUTO_RELOAD_ENABLED)
+                if toggle then
+                    if AUTO_RELOAD_ENABLED then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -19215,7 +19112,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Auto Save Players Keybind
-    KeybindElements["Keybind_AutoSavePlayers"] = createKeybindWithFallback("Keybind_AutoSavePlayers", {
+    KeybindsSection:Keybind({
         Title = "Auto Save Players",
         Flag = "Keybind_AutoSavePlayers",
         Desc = "Toggle Auto Save Players feature",
@@ -19223,8 +19120,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.AutoSavePlayers
-                if toggle and toggle.Set then
-                    toggle:Set(not AUTO_SAVE_PLAYERS_ENABLED)
+                if toggle then
+                    if AUTO_SAVE_PLAYERS_ENABLED then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -19244,7 +19145,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Kill Aura Keybind
-    KeybindElements["Keybind_KillAura"] = createKeybindWithFallback("Keybind_KillAura", {
+    KeybindsSection:Keybind({
         Title = "Kill Aura",
         Flag = "Keybind_KillAura",
         Desc = "Toggle Kill Aura feature",
@@ -19252,8 +19153,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.KillAura
-                if toggle and toggle.Set then
-                    toggle:Set(not KillAuraEnabled)
+                if toggle then
+                    if KillAuraEnabled then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -19273,7 +19178,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Reach Keybind
-    KeybindElements["Keybind_Reach"] = createKeybindWithFallback("Keybind_Reach", {
+    KeybindsSection:Keybind({
         Title = "Reach",
         Flag = "Keybind_Reach",
         Desc = "Toggle Reach feature",
@@ -19281,8 +19186,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.Reach
-                if toggle and toggle.Set then
-                    toggle:Set(not KillAura_HitboxExpanderEnabled)
+                if toggle then
+                    if KillAura_HitboxExpanderEnabled then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -19302,7 +19211,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Auto Equip Melee Keybind
-    KeybindElements["Keybind_AutoEquipMelee"] = createKeybindWithFallback("Keybind_AutoEquipMelee", {
+    KeybindsSection:Keybind({
         Title = "Auto Equip Melee",
         Flag = "Keybind_AutoEquipMelee",
         Desc = "Toggle Auto Equip Melee feature",
@@ -19310,8 +19219,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.AutoEquipMelee
-                if toggle and toggle.Set then
-                    toggle:Set(not KillAura_AutoEquipMelee)
+                if toggle then
+                    if KillAura_AutoEquipMelee then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -19331,7 +19244,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Bayonet Kill Aura Keybind
-    KeybindElements["Keybind_BayonetKillAura"] = createKeybindWithFallback("Keybind_BayonetKillAura", {
+    KeybindsSection:Keybind({
         Title = "Bayonet Kill Aura",
         Flag = "Keybind_BayonetKillAura",
         Desc = "Toggle Bayonet Kill Aura feature",
@@ -19339,8 +19252,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.BayonetKillAura
-                if toggle and toggle.Set then
-                    toggle:Set(not KillAura_EnableBayonet)
+                if toggle then
+                    if KillAura_EnableBayonet then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -19360,7 +19277,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Auto Look Keybind
-    KeybindElements["Keybind_AutoLook"] = createKeybindWithFallback("Keybind_AutoLook", {
+    KeybindsSection:Keybind({
         Title = "Auto Look",
         Flag = "Keybind_AutoLook",
         Desc = "Toggle Auto Look feature",
@@ -19368,8 +19285,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.AutoLook
-                if toggle and toggle.Set then
-                    toggle:Set(not KillAuraAutoLook)
+                if toggle then
+                    if KillAuraAutoLook then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -19389,7 +19310,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Shove Aura Keybind
-    KeybindElements["Keybind_ShoveAura"] = createKeybindWithFallback("Keybind_ShoveAura", {
+    KeybindsSection:Keybind({
         Title = "Shove Aura",
         Flag = "Keybind_ShoveAura",
         Desc = "Toggle Shove Aura feature",
@@ -19397,8 +19318,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.ShoveAura
-                if toggle and toggle.Set then
-                    toggle:Set(not ShoveAuraEnabled)
+                if toggle then
+                    if ShoveAuraEnabled then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -19418,7 +19343,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Apply WalkSpeed Keybind
-    KeybindElements["Keybind_ApplyWalkSpeed"] = createKeybindWithFallback("Keybind_ApplyWalkSpeed", {
+    KeybindsSection:Keybind({
         Title = "Apply WalkSpeed",
         Flag = "Keybind_ApplyWalkSpeed",
         Desc = "Toggle Apply WalkSpeed feature",
@@ -19426,8 +19351,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.ApplyWalkSpeed
-                if toggle and toggle.Set then
-                    toggle:Set(not walkLoopEnabled)
+                if toggle then
+                    if walkLoopEnabled then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -19447,7 +19376,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Auto Remove Horses Keybind
-    KeybindElements["Keybind_AutoRemoveHorses"] = createKeybindWithFallback("Keybind_AutoRemoveHorses", {
+    KeybindsSection:Keybind({
         Title = "Auto Remove Horses",
         Flag = "Keybind_AutoRemoveHorses",
         Desc = "Toggle Auto Remove Horses feature",
@@ -19455,8 +19384,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.AutoRemoveHorses
-                if toggle and toggle.Set then
-                    toggle:Set(not AutoRemoveHorsesEnabled)
+                if toggle then
+                    if AutoRemoveHorsesEnabled then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -19476,7 +19409,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- No Fall Damage Keybind
-    KeybindElements["Keybind_NoFallDamage"] = createKeybindWithFallback("Keybind_NoFallDamage", {
+    KeybindsSection:Keybind({
         Title = "No Fall Damage",
         Flag = "Keybind_NoFallDamage",
         Desc = "Toggle No Fall Damage feature",
@@ -19484,8 +19417,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.NoFallDamage
-                if toggle and toggle.Set then
-                    toggle:Set(not noFallDamageEnabled)
+                if toggle then
+                    if noFallDamageEnabled then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -19505,7 +19442,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Fly Keybind
-    KeybindElements["Keybind_Fly"] = createKeybindWithFallback("Keybind_Fly", {
+    KeybindsSection:Keybind({
         Title = "Fly",
         Flag = "Keybind_Fly",
         Desc = "Toggle Fly feature",
@@ -19513,8 +19450,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.Fly
-                if toggle and toggle.Set then
-                    toggle:Set(not FlyEnabled)
+                if toggle then
+                    if FlyEnabled then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
@@ -19534,7 +19475,7 @@ do -- // Keybinds and UI Tab
     })
     
     -- Noclip Keybind
-    KeybindElements["Keybind_Noclip"] = createKeybindWithFallback("Keybind_Noclip", {
+    KeybindsSection:Keybind({
         Title = "Noclip",
         Flag = "Keybind_Noclip",
         Desc = "Toggle Noclip feature (requires Fly enabled)",
@@ -19542,8 +19483,12 @@ do -- // Keybinds and UI Tab
         Callback = function()
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.NoclipBypass
-                if toggle and toggle.Set then
-                    toggle:Set(not NoclipEnabled)
+                if toggle then
+                    if NoclipEnabled then
+                        toggle:Disable()
+                    else
+                        toggle:Enable()
+                    end
                 end
             end)
         end
