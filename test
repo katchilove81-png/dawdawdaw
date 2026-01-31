@@ -18754,11 +18754,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.HeadHit
                 if toggle then
-                    if HeadHitEnabled then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not HeadHitEnabled)
                 end
             end)
         end
@@ -18789,11 +18785,7 @@ do -- // Keybinds and UI Tab
                 if toggle then
                     local LocalPlayer = game:GetService("Players").LocalPlayer
                     local currentState = LocalPlayer:GetAttribute("AutoJumpEnabled") or false
-                    if currentState then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not currentState)
                 end
             end)
         end
@@ -18824,11 +18816,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.HitboxExpander
                 if toggle then
-                    if hitboxEnabled then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not hitboxEnabled)
                 end
             end)
         end
@@ -18857,11 +18845,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.ShoveHitbox
                 if toggle then
-                    if ShoveHitboxExpanderEnabled then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not ShoveHitboxExpanderEnabled)
                 end
             end)
         end
@@ -18890,11 +18874,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.AutoParrySapper
                 if toggle then
-                    if AutoParrySapperMeleeEnabled then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not AutoParrySapperMeleeEnabled)
                 end
             end)
         end
@@ -18923,11 +18903,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.AutoShoot
                 if toggle then
-                    if USER_AUTO_SHOOT_TOGGLE then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not USER_AUTO_SHOOT_TOGGLE)
                 end
             end)
         end
@@ -18956,11 +18932,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.InstantShoot
                 if toggle then
-                    if INSTANT_SHOOT_ENABLED then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not INSTANT_SHOOT_ENABLED)
                 end
             end)
         end
@@ -18989,11 +18961,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.UseFov
                 if toggle then
-                    if USE_FOV then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not USE_FOV)
                 end
             end)
         end
@@ -19022,11 +18990,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.ShowFov
                 if toggle then
-                    if SHOW_FOV then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not SHOW_FOV)
                 end
             end)
         end
@@ -19055,11 +19019,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.WallCheck
                 if toggle then
-                    if CHECK_WALLS then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not CHECK_WALLS)
                 end
             end)
         end
@@ -19088,11 +19048,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.AutoReload
                 if toggle then
-                    if AUTO_RELOAD_ENABLED then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not AUTO_RELOAD_ENABLED)
                 end
             end)
         end
@@ -19121,11 +19077,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.AutoSavePlayers
                 if toggle then
-                    if AUTO_SAVE_PLAYERS_ENABLED then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not AUTO_SAVE_PLAYERS_ENABLED)
                 end
             end)
         end
@@ -19154,11 +19106,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.KillAura
                 if toggle then
-                    if KillAuraEnabled then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not KillAuraEnabled)
                 end
             end)
         end
@@ -19187,11 +19135,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.Reach
                 if toggle then
-                    if KillAura_HitboxExpanderEnabled then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not KillAura_HitboxExpanderEnabled)
                 end
             end)
         end
@@ -19220,11 +19164,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.AutoEquipMelee
                 if toggle then
-                    if KillAura_AutoEquipMelee then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not KillAura_AutoEquipMelee)
                 end
             end)
         end
@@ -19253,11 +19193,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.BayonetKillAura
                 if toggle then
-                    if KillAura_EnableBayonet then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not KillAura_EnableBayonet)
                 end
             end)
         end
@@ -19286,11 +19222,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.AutoLook
                 if toggle then
-                    if KillAuraAutoLook then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not KillAuraAutoLook)
                 end
             end)
         end
@@ -19319,11 +19251,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.ShoveAura
                 if toggle then
-                    if ShoveAuraEnabled then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not ShoveAuraEnabled)
                 end
             end)
         end
@@ -19352,11 +19280,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.ApplyWalkSpeed
                 if toggle then
-                    if walkLoopEnabled then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not walkLoopEnabled)
                 end
             end)
         end
@@ -19385,11 +19309,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.AutoRemoveHorses
                 if toggle then
-                    if AutoRemoveHorsesEnabled then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not AutoRemoveHorsesEnabled)
                 end
             end)
         end
@@ -19418,11 +19338,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.NoFallDamage
                 if toggle then
-                    if noFallDamageEnabled then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not noFallDamageEnabled)
                 end
             end)
         end
@@ -19451,11 +19367,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.Fly
                 if toggle then
-                    if FlyEnabled then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not FlyEnabled)
                 end
             end)
         end
@@ -19484,11 +19396,7 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.NoclipBypass
                 if toggle then
-                    if NoclipEnabled then
-                        toggle:Disable()
-                    else
-                        toggle:Enable()
-                    end
+                    toggle:Set(not NoclipEnabled)
                 end
             end)
         end
