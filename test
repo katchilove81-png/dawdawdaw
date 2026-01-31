@@ -400,11 +400,19 @@ local rotationIndex = 0
 local guiList = {} -- Cached list of GUIs to rotate
 local lastGuiListUpdate = 0
 local GUI_LIST_CACHE_TIME = 60 -- Rebuild list every 60 seconds
+local nameRotationRuns = 0
+local MAX_ROTATION_RUNS = 20 -- PERFORMANCE: Stop after 20 rotations (pattern detection isn't that smart)
 
 local function startNameRotation()
     task.defer(function()
-        while true do
+        while nameRotationRuns < MAX_ROTATION_RUNS do
             task.wait(180) -- PERFORMANCE: Rotate every 3 minutes
+            
+            -- PERFORMANCE: Skip if no GUIs to rotate
+            if not next(OurScriptGUIs) then
+                task.wait(60) -- Sleep longer if nothing to do
+                continue
+            end
             
             -- Rebuild GUI list periodically (not every cycle)
             local now = os.clock()
@@ -439,8 +447,10 @@ local function startNameRotation()
                         end)
                     end
                 end
+                nameRotationRuns = nameRotationRuns + 1
             end
         end
+        -- PERFORMANCE: After max runs, name rotation stops (anti-cheat rarely rechecks names)
     end)
 end
 
@@ -505,31 +515,44 @@ local function startESPProtectionScanner()
     task.defer(function()
         task.wait(5) -- Initial delay
         while true do
-            pcall(function()
-                -- Protect any ESPData entries
-                if ESPData then
-                    for espType, typeData in pairs(ESPData) do
-                        protectESPData(typeData)
-                    end
+            -- PERFORMANCE: Only scan if there's actual ESP data to protect
+            local hasData = false
+            if ESPData then
+                for _, typeData in pairs(ESPData) do
+                    if next(typeData) then hasData = true break end
                 end
-                
-                -- Protect PlayerESPData
-                if PlayerESPData then
-                    for player, data in pairs(PlayerESPData) do
-                        if data then
-                            if data.Highlight then protectESP(data.Highlight) end
-                            if data.Billboard then protectESP(data.Billboard) end
+            end
+            if PlayerESPData and next(PlayerESPData) then hasData = true end
+            if activeHighlight or activeAimDot then hasData = true end
+            
+            if hasData then
+                pcall(function()
+                    -- Protect any ESPData entries
+                    if ESPData then
+                        for espType, typeData in pairs(ESPData) do
+                            protectESPData(typeData)
                         end
                     end
-                end
-                
-                -- Protect active target visuals
-                if activeHighlight then protectESP(activeHighlight) end
-                if activeAimDot then protectESP(activeAimDot) end
-                if activeAimDotPart then protectESP(activeAimDotPart) end
-            end)
-            
-            task.wait(10) -- Scan every 10 seconds
+                    
+                    -- Protect PlayerESPData
+                    if PlayerESPData then
+                        for player, data in pairs(PlayerESPData) do
+                            if data then
+                                if data.Highlight then protectESP(data.Highlight) end
+                                if data.Billboard then protectESP(data.Billboard) end
+                            end
+                        end
+                    end
+                    
+                    -- Protect active target visuals
+                    if activeHighlight then protectESP(activeHighlight) end
+                    if activeAimDot then protectESP(activeAimDot) end
+                    if activeAimDotPart then protectESP(activeAimDotPart) end
+                end)
+                task.wait(15) -- PERFORMANCE: Scan every 15 seconds when active
+            else
+                task.wait(30) -- PERFORMANCE: Sleep longer when no data to protect
+            end
         end
     end)
 end
@@ -1005,18 +1028,22 @@ end
 local connectionCleanerCycles = 0
 local lastGCTime = 0
 local GC_INTERVAL = 300 -- Run full GC every 5 minutes max
+local connectionCleanerRuns = 0
+local MAX_CLEANER_RUNS = 10 -- PERFORMANCE: Stop after 10 runs (anti-cheat connections don't change)
 
 task.defer(function()
     task.wait(10) -- Initial delay to let game load
     local initialCleaned = cleanAntiCheatConnections() -- Run once at start
+    connectionCleanerRuns = 1
     
-    while true do
+    while connectionCleanerRuns < MAX_CLEANER_RUNS do
         -- Adaptive wait: if we cleaned something last time, check sooner
         local waitTime = (connectionCleanerCycles > 0 and connectionCleanerCycles < 3) and 60 or 180
         task.wait(waitTime)
         
         local cleaned = cleanAntiCheatConnections()
         connectionCleanerCycles = cleaned > 0 and (connectionCleanerCycles + 1) or 0
+        connectionCleanerRuns = connectionCleanerRuns + 1
         
         -- Smart garbage collection: only run when beneficial
         local now = os.clock()
@@ -1027,6 +1054,7 @@ task.defer(function()
             lastGCTime = now
         end
     end
+    -- PERFORMANCE: After max runs, connection cleaner stops (anti-cheat connections are static)
 end)
 
 -- ===== 8. REMOTE SPY BLOCKER =====
@@ -1222,7 +1250,7 @@ do
         return count
     end
     
-    -- Run scan periodically
+    -- Run scan once at start, then only occasionally (not infinite loop)
     task.defer(function()
         task.wait(2)
         local found = scanAndDisableAdminRemotes()
@@ -1230,11 +1258,12 @@ do
             warn("[ANTI-BAN] Found and protected " .. found .. " potential admin remotes")
         end
         
-        -- Rescan periodically in case new ones are added
-        while true do
-            task.wait(30)
+        -- PERFORMANCE: Only rescan a few times, not forever
+        for _ = 1, 3 do
+            task.wait(60) -- Wait 1 minute between rescans
             scanAndDisableAdminRemotes()
         end
+        -- After 3 rescans, stop (game remotes don't change)
     end)
 end
 
@@ -1391,7 +1420,8 @@ do
     local FRAME_SKIP_HEAVY = 5 -- skip every N frames for heavy features (ESP, etc.)
     
     -- LOW-END MODE ALWAYS ENABLED (hardcoded for performance)
-    local isLowEndDevice = true -- Always enabled for better performance
+    local isLowEndDevice = false -- Always enabled for better performance
+    _G.LowEndMode = false -- Compatibility flag: low-end mode is always on
     
     -- Feature activity tracking
     _G.KatchiPerf = {
@@ -1488,14 +1518,29 @@ do
     
     -- ===== PERIODIC GARBAGE COLLECTION =====
     -- PERFORMANCE: Run garbage collection periodically to prevent memory buildup
+    -- Uses adaptive timing based on memory usage
+    local lastGCMemory = 0
+    local gcRunCount = 0
     task.defer(function()
-        task.wait(30) -- Initial delay
+        task.wait(45) -- Initial delay (stagger from other loops)
         while true do
-            -- Run incremental garbage collection
-            pcall(function()
-                collectgarbage("step", 200)
-            end)
-            task.wait(60) -- Run every 60 seconds
+            -- Check memory before deciding to GC
+            local currentMemory = 0
+            pcall(function() currentMemory = collectgarbage("count") end)
+            
+            -- Only run GC if memory increased significantly (>5MB since last check)
+            local memoryDelta = currentMemory - lastGCMemory
+            if memoryDelta > 5000 or gcRunCount < 3 then
+                pcall(function()
+                    collectgarbage("step", 200)
+                end)
+                lastGCMemory = currentMemory
+                gcRunCount = gcRunCount + 1
+            end
+            
+            -- PERFORMANCE: Adaptive wait - longer if memory stable, shorter if growing
+            local waitTime = memoryDelta > 2000 and 45 or 90
+            task.wait(waitTime)
         end
     end)
     
@@ -3463,7 +3508,12 @@ end
 -- RenderStepped loop to continuously update aim dot position with smooth lerp
 local aimDotUpdateConn = nil
 local aimDotFrameCounter = 0
-local AIM_DOT_UPDATE_INTERVAL = 2 -- Update every N frames when no target
+local AIM_DOT_BASE_UPDATE_INTERVAL = 2 -- Update every N frames when no target
+local AIM_DOT_IDLE_LOWEND_INTERVAL = 6 -- Throttle harder when idle on low-end
+local function getAimDotInterval()
+    local low = (_G.KatchiPerf and _G.KatchiPerf.lowEndMode) or (_G.LowEndMode == true)
+    return low and AIM_DOT_IDLE_LOWEND_INTERVAL or AIM_DOT_BASE_UPDATE_INTERVAL
+end
 local function startAimDotUpdateLoop()
     if aimDotUpdateConn then return end
     aimDotUpdateConn = RunService.RenderStepped:Connect(function(deltaTime)
@@ -3525,7 +3575,8 @@ local function startAimDotUpdateLoop()
         -- Performance: Skip frames when no active target (dot just resting at head)
         if not hasActiveTarget then
             aimDotFrameCounter = aimDotFrameCounter + 1
-            if aimDotFrameCounter < AIM_DOT_UPDATE_INTERVAL then return end
+            local interval = getAimDotInterval()
+            if aimDotFrameCounter < interval then return end
             aimDotFrameCounter = 0
         else
             aimDotFrameCounter = 0 -- Reset counter when we have a target
@@ -4215,10 +4266,14 @@ end
 task.defer(function()
     task.wait(2) -- Stagger start
     while true do
-        task.wait(0.5) -- Reduced frequency for performance
+        -- PERFORMANCE: Only run if visualization is enabled
         if BOMBER_VISUALIZE_RADIUS then
             if _G.KatchiPerf then _G.KatchiPerf.markActive("BomberVis") end
             pcall(updateBomberRadiusVisuals)
+            task.wait(0.5) -- Update at normal rate when active
+        else
+            -- PERFORMANCE: Sleep longer when disabled to reduce overhead
+            task.wait(2)
         end
     end
 end)
@@ -8495,12 +8550,39 @@ local function KillAura_getMeleeTool()
 
     local equipped = KillAura_findMeleeToolIn(char)
     if equipped then return equipped end
+    
+    -- COORDINATION: If Shove Aura is enabled, check if a shove-compatible tool is equipped
+    -- If so, we can use it for Kill Aura too (melee tools can shove)
+    if ShoveAuraEnabled then
+        local anyEquipped = char:FindFirstChildOfClass("Tool")
+        if anyEquipped then
+            -- Check if the equipped tool has a remote we can use
+            local toolFolder = Workspace:FindFirstChild("Players") and Workspace.Players:FindFirstChild(LocalPlayer.Name)
+            if toolFolder then
+                local remoteFolder = toolFolder:FindFirstChild(anyEquipped.Name)
+                if remoteFolder and remoteFolder:FindFirstChild("RemoteEvent") then
+                    -- This tool can be used for both - don't switch
+                    return anyEquipped
+                end
+            end
+        end
+    end
 
     local backpack = LocalPlayer:FindFirstChildOfClass("Backpack") or LocalPlayer:FindFirstChild("Backpack")
     if not backpack then return nil end
 
     local stored = KillAura_findMeleeToolIn(backpack)
     if stored and KillAura_AutoEquipMelee then
+        -- COORDINATION: Don't equip if Shove Aura recently fired (prevents fighting)
+        local coord = _G.AuraCoordination
+        if coord and ShoveAuraEnabled then
+            local timeSinceShoveAura = tick() - (coord.shoveAuraLastFire or 0)
+            if timeSinceShoveAura < 0.15 then
+                -- Shove Aura just fired, skip equip this cycle
+                return nil
+            end
+        end
+        
         local ok = pcall(function()
             stored.Parent = char
         end)
@@ -8866,11 +8948,19 @@ local function KillAura_performKillAura(hrp)
 end
 
 -- Separate Auto Look function that finds the nearest zombie independently
--- Uses high-responsiveness BodyGyro for instant feel without disrupting movement
+-- When flying: uses Fly's BodyGyro directly for seamless integration with pitch limit
+-- When not flying: uses its own Y-axis BodyGyro
 local KillAura_autoLookGyro = nil
+KillAura_autoLookHasTarget = false -- Global: Track if we have a target (for fly to check)
+local AUTO_LOOK_MAX_PITCH_DOWN = 60 -- Maximum degrees to look down (like fly limit)
+local AUTO_LOOK_MAX_PITCH_UP = 45 -- Maximum degrees to look up
+local autoLook_lastFlyState = false -- Track fly state to detect transitions
 
 local function KillAura_cleanupAutoLook()
-    -- Always clean up when disabled
+    -- Mark no target
+    KillAura_autoLookHasTarget = false
+    
+    -- Clean up our own gyro (only used when not flying)
     pcall(function()
         if KillAura_autoLookGyro then
             KillAura_autoLookGyro:Destroy()
@@ -8888,17 +8978,44 @@ local function KillAura_cleanupAutoLook()
             end
         end
     end)
-    -- Re-enable fly gyro if flying
-    if FlyEnabled and FlyBodyGyro then
-        pcall(function() FlyBodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge) end)
-    end
+    -- Note: Fly's BodyGyro is NOT touched here - fly loop handles its own gyro
+end
+
+-- Clean up only the ground gyro (used when transitioning to fly mode)
+local function KillAura_cleanupGroundGyro()
+    pcall(function()
+        if KillAura_autoLookGyro then
+            KillAura_autoLookGyro:Destroy()
+            KillAura_autoLookGyro = nil
+        end
+    end)
+    pcall(function()
+        local char = LocalPlayer.Character
+        if char then
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local gyro = hrp:FindFirstChild("KatchiAutoLookGyro")
+                if gyro then gyro:Destroy() end
+            end
+        end
+    end)
 end
 
 local function KillAura_performAutoLook(hrp)
     -- If disabled, clean up everything and return
     if not KillAuraAutoLook then
         KillAura_cleanupAutoLook()
+        autoLook_lastFlyState = FlyEnabled
         return
+    end
+    
+    -- Detect fly state transition
+    local flyStateChanged = (FlyEnabled ~= autoLook_lastFlyState)
+    autoLook_lastFlyState = FlyEnabled
+    
+    -- If fly state changed, clean up ground gyro to prevent conflicts
+    if flyStateChanged then
+        KillAura_cleanupGroundGyro()
     end
     
     local hrpPos = hrp.Position
@@ -8938,68 +9055,80 @@ local function KillAura_performAutoLook(hrp)
     
     if nearestHead and nearestHead.Parent then
         local targetPos = nearestHead.Position
-        -- Calculate look direction (Y-axis only - horizontal rotation)
-        local lookAt = Vector3.new(targetPos.X, hrpPos.Y, targetPos.Z)
-        local direction = (lookAt - hrpPos)
+        local direction = (targetPos - hrpPos)
         
         if direction.Magnitude > 0.1 then
-            if FlyEnabled then
-                -- When flying: disable fly's BodyGyro and use our own with very high responsiveness
-                if FlyBodyGyro and FlyBodyGyro.Parent then
-                    pcall(function() FlyBodyGyro.MaxTorque = Vector3.new(0, 0, 0) end)
+            local targetCFrame
+            
+            -- Check if flying (FlyEnabled AND FlyBodyGyro exists)
+            local isFlying = FlyEnabled and FlyBodyGyro and FlyBodyGyro.Parent
+            
+            if isFlying then
+                -- FLYING: Look at actual target position with pitch limit
+                -- Calculate pitch angle (angle from horizontal)
+                local horizontalDist = math.sqrt(direction.X^2 + direction.Z^2)
+                local verticalDist = direction.Y
+                local pitchRad = math.atan2(-verticalDist, horizontalDist) -- Negative because down is negative Y
+                local pitchDeg = math.deg(pitchRad)
+                
+                -- Clamp pitch to limits
+                local clampedPitchDeg = math.clamp(pitchDeg, -AUTO_LOOK_MAX_PITCH_UP, AUTO_LOOK_MAX_PITCH_DOWN)
+                local clampedPitchRad = math.rad(clampedPitchDeg)
+                
+                -- Calculate the look-at position with clamped pitch
+                local horizontalDir = Vector3.new(direction.X, 0, direction.Z)
+                if horizontalDir.Magnitude > 0.01 then
+                    horizontalDir = horizontalDir.Unit
+                else
+                    horizontalDir = hrp.CFrame.LookVector * Vector3.new(1, 0, 1)
+                    if horizontalDir.Magnitude > 0.01 then horizontalDir = horizontalDir.Unit else horizontalDir = Vector3.new(1, 0, 0) end
                 end
                 
-                -- Find or create our AutoLook BodyGyro with VERY high P for instant response
-                local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
-                if not autoLookGyro or not autoLookGyro.Parent then
-                    -- Clean up old reference if it exists but is orphaned
-                    if KillAura_autoLookGyro and not KillAura_autoLookGyro.Parent then
-                        KillAura_autoLookGyro = nil
-                    end
-                    autoLookGyro = Instance.new("BodyGyro")
-                    autoLookGyro.Name = "KatchiAutoLookGyro"
-                    autoLookGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-                    autoLookGyro.P = 1000000 -- Very high P for near-instant rotation
-                    autoLookGyro.D = 500 -- Lower D to reduce oscillation
-                    autoLookGyro.Parent = hrp
-                    KillAura_autoLookGyro = autoLookGyro
-                end
+                -- Create look-at point at clamped pitch angle
+                local lookDist = 10 -- Arbitrary distance for look-at calculation
+                local clampedY = -math.sin(clampedPitchRad) * lookDist
+                local clampedHorizontal = math.cos(clampedPitchRad) * lookDist
+                local lookAt = hrpPos + horizontalDir * clampedHorizontal + Vector3.new(0, clampedY, 0)
                 
-                -- Set target rotation (full 3D look at target)
-                autoLookGyro.CFrame = CFrame.lookAt(hrpPos, lookAt)
+                targetCFrame = CFrame.lookAt(hrpPos, lookAt)
+                
+                -- Use Fly's BodyGyro directly
+                KillAura_autoLookHasTarget = true
+                FlyBodyGyro.CFrame = targetCFrame
+                
+                -- Destroy our own gyro if it exists (not needed when flying)
+                if KillAura_autoLookGyro and KillAura_autoLookGyro.Parent then
+                    KillAura_autoLookGyro:Destroy()
+                    KillAura_autoLookGyro = nil
+                end
             else
-                -- Not flying: use Y-axis only rotation with very high responsiveness
+                -- NOT FLYING: Use our own Y-axis only BodyGyro (horizontal rotation only)
+                local lookAt = Vector3.new(targetPos.X, hrpPos.Y, targetPos.Z)
+                targetCFrame = CFrame.lookAt(hrpPos, lookAt)
+                
+                KillAura_autoLookHasTarget = true
                 local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
-                if not autoLookGyro then
+                
+                if not autoLookGyro or not autoLookGyro.Parent then
+                    -- Create new gyro for ground use
                     autoLookGyro = Instance.new("BodyGyro")
                     autoLookGyro.Name = "KatchiAutoLookGyro"
-                    autoLookGyro.MaxTorque = Vector3.new(0, math.huge, 0) -- Only Y-axis rotation (doesn't affect movement)
-                    autoLookGyro.P = 1000000 -- Very high P for near-instant rotation
-                    autoLookGyro.D = 500 -- Lower D to reduce oscillation
+                    autoLookGyro.P = 1000000 -- Very high P for instant rotation
+                    autoLookGyro.D = 500 -- Low D to reduce oscillation
+                    autoLookGyro.MaxTorque = Vector3.new(0, math.huge, 0) -- Y-axis only
                     autoLookGyro.Parent = hrp
                     KillAura_autoLookGyro = autoLookGyro
                 end
                 
-                -- Set target rotation
-                autoLookGyro.CFrame = CFrame.lookAt(hrpPos, lookAt)
+                autoLookGyro.CFrame = targetCFrame
             end
+        else
+            -- Target too close, cleanup
+            KillAura_cleanupAutoLook()
         end
     else
-        -- No target: clean up BodyGyro and re-enable fly's BodyGyro
-        pcall(function()
-            local autoLookGyro = hrp:FindFirstChild("KatchiAutoLookGyro")
-            if autoLookGyro then
-                autoLookGyro:Destroy()
-            end
-            KillAura_autoLookGyro = nil
-        end)
-        
-        -- Re-enable fly's BodyGyro if flying (must always restore when no target)
-        if FlyEnabled and FlyBodyGyro and FlyBodyGyro.Parent then
-            pcall(function() 
-                FlyBodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-            end)
-        end
+        -- No target
+        KillAura_cleanupAutoLook()
     end
 end
 
@@ -9080,17 +9209,33 @@ local KillAura_nextTick = 0
 task.defer(function()
     task.wait(0.5) -- Stagger start
     RunService.Heartbeat:Connect(function()
-        -- PERFORMANCE: Skip entirely if both features are disabled
-        if not KillAuraEnabled and not KillAura_HitboxExpanderEnabled then return end
-        
         local char = LocalPlayer.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         if not hrp then return end
+        
+        -- AUTO LOOK runs EVERY FRAME (not throttled by attack speed)
+        -- Must run before any early returns to be responsive while flying
+        if KillAuraAutoLook then
+            KillAura_performAutoLook(hrp)
+        end
+        
+        -- PERFORMANCE: Skip attack logic if both features are disabled
+        if not KillAuraEnabled and not KillAura_HitboxExpanderEnabled then return end
 
-        -- Pause while grabbed/pinned
+        -- Pause attacks while grabbed/pinned (but Auto Look already ran above)
         if KillAura_isPinnedOrGrabbed() then return end
 
         local now = tick()
+        
+        -- COORDINATION: Check if Shove Aura just fired (avoid overlapping)
+        local coord = _G.AuraCoordination
+        if coord then
+            local timeSinceShoveAura = now - (coord.shoveAuraLastFire or 0)
+            -- If Shove Aura fired very recently and is enabled, tiny delay
+            if ShoveAuraEnabled and timeSinceShoveAura < 0.02 then
+                return -- Skip this frame, try next heartbeat
+            end
+        end
         
         -- Attack speed throttle
         if now < KillAura_nextTick then return end
@@ -9113,17 +9258,17 @@ task.defer(function()
         -- Scan remotes periodically
         if now - KillAura_lastRemoteScan > 5 then KillAura_ScanRemotesNow() end
 
+        -- COORDINATION: Mark when Kill Aura fires
+        if coord then
+            coord.killAuraLastFire = now
+        end
+
         -- Execute attacks
         if KillAura_HitboxExpanderEnabled then
             KillAura_performAutoHead(hrp)
         end
         if KillAuraEnabled then
             KillAura_performKillAura(hrp)
-        end
-        
-        -- Auto Look runs independently (even without Kill Aura enabled)
-        if KillAuraAutoLook then
-            KillAura_performAutoLook(hrp)
         end
     end)
 end)
@@ -9859,11 +10004,13 @@ do -- // Medic Section in Classes Tab
     task.defer(function()
         task.wait(2) -- Stagger start
         while true do
-            task.wait(0.25) -- Increased from 0.15 to 0.25 for better performance
             if AutoPickUpSuppliesEnabled then
                 -- Always try to pick up - the game will naturally stop us if full
                 -- The fireproximityprompt will fail silently if we can't pick up more
                 FireReplenishPrompt()
+                task.wait(0.25) -- Active: check every 0.25s
+            else
+                task.wait(2) -- PERFORMANCE: Sleep longer when disabled
             end
         end
     end)
@@ -9905,20 +10052,41 @@ do -- // Sapper Section in Classes Tab
     local AutoRepairRange = 25 -- Range to search for buildable structures
     local AutoRepairCooldown = 0.15 -- Throttle interval
     
-    -- Helper: Find hammer from backpack or character (no need to equip)
+    -- Helper: Find hammer remote from workspace.Players, backpack, or character
+    -- The game stores remotes in workspace.Players.<PlayerName>.<ToolName>.RemoteEvent
     local function getHammerRemote()
         local char = LocalPlayer.Character
         if not char then return nil end
         
-        -- Check backpack first, then character
-        local hammer = LocalPlayer.Backpack:FindFirstChild("Hammer") 
-            or LocalPlayer.Backpack:FindFirstChild("Claw Hammer")
-            or char:FindFirstChild("Hammer")
-            or char:FindFirstChild("Claw Hammer")
+        -- Method 1: Check workspace.Players folder (where remotes actually are)
+        local wsPlayers = Workspace:FindFirstChild("Players")
+        if wsPlayers then
+            local playerFolder = wsPlayers:FindFirstChild(LocalPlayer.Name)
+            if playerFolder then
+                -- Check for Hammer or Claw Hammer folder
+                local hammerFolder = playerFolder:FindFirstChild("Hammer") 
+                    or playerFolder:FindFirstChild("Claw Hammer")
+                if hammerFolder and hammerFolder:FindFirstChild("RemoteEvent") then
+                    return hammerFolder.RemoteEvent
+                end
+            end
+        end
         
+        -- Method 2: Check backpack (tool instance)
+        local backpack = LocalPlayer:FindFirstChild("Backpack")
+        if backpack then
+            local hammer = backpack:FindFirstChild("Hammer") or backpack:FindFirstChild("Claw Hammer")
+            if hammer and hammer:FindFirstChild("RemoteEvent") then
+                return hammer.RemoteEvent
+            end
+        end
+        
+        -- Method 3: Check character (if equipped)
+        local hammer = char:FindFirstChild("Hammer") or char:FindFirstChild("Claw Hammer")
         if hammer and hammer:FindFirstChild("RemoteEvent") then
             return hammer.RemoteEvent
         end
+        
         return nil
     end
     
@@ -9932,6 +10100,7 @@ do -- // Sapper Section in Classes Tab
         
         local buildables = {}
         local rangeSq = AutoRepairRange * AutoRepairRange
+        local addedHealthObjects = {} -- Track what we've already added to avoid duplicates
         
         -- Scan workspace for buildable structures
         -- Check common locations: Stakes, Barricades, Buildings, etc.
@@ -9940,7 +10109,7 @@ do -- // Sapper Section in Classes Tab
             
             -- Check for BuildingHealth (barricades, stakes, structures)
             local buildHealth = inst:FindFirstChild("BuildingHealth")
-            if buildHealth then
+            if buildHealth and not addedHealthObjects[buildHealth] then
                 local pos = nil
                 if inst:IsA("BasePart") then
                     pos = inst.Position
@@ -9952,11 +10121,16 @@ do -- // Sapper Section in Classes Tab
                 if pos then
                     local distSq = (pos - rootPos).Magnitude ^ 2
                     if distSq <= rangeSq then
-                        local currentHealth = buildHealth.Value
-                        local maxHealth = buildHealth:GetAttribute("MaxHealth")
-                        -- Only add if needs repair/building
-                        if maxHealth and currentHealth < maxHealth then
+                        -- Check if needs repair (current < max)
+                        local needsRepair = true
+                        pcall(function()
+                            local currentHealth = buildHealth.Value
+                            local maxHealth = buildHealth:GetAttribute("MaxHealth") or buildHealth:GetAttribute("Max") or 100
+                            needsRepair = currentHealth < maxHealth
+                        end)
+                        if needsRepair then
                             table.insert(buildables, buildHealth)
+                            addedHealthObjects[buildHealth] = true
                         end
                     end
                 end
@@ -9964,7 +10138,7 @@ do -- // Sapper Section in Classes Tab
             
             -- Check for ConstructHealth (bridge parts, etc.)
             local constructHealth = inst:FindFirstChild("ConstructHealth")
-            if constructHealth then
+            if constructHealth and not addedHealthObjects[constructHealth] then
                 local pos = nil
                 if inst:IsA("BasePart") then
                     pos = inst.Position
@@ -9977,6 +10151,36 @@ do -- // Sapper Section in Classes Tab
                     local distSq = (pos - rootPos).Magnitude ^ 2
                     if distSq <= rangeSq then
                         table.insert(buildables, constructHealth)
+                        addedHealthObjects[constructHealth] = true
+                    end
+                end
+            end
+            
+            -- Check for Health (some structures use just "Health")
+            local health = inst:FindFirstChild("Health")
+            if health and health:IsA("NumberValue") and not addedHealthObjects[health] then
+                local pos = nil
+                if inst:IsA("BasePart") then
+                    pos = inst.Position
+                elseif inst:IsA("Model") then
+                    local primary = inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart")
+                    if primary then pos = primary.Position end
+                end
+                
+                if pos then
+                    local distSq = (pos - rootPos).Magnitude ^ 2
+                    if distSq <= rangeSq then
+                        -- Check if needs repair
+                        local needsRepair = true
+                        pcall(function()
+                            local currentHealth = health.Value
+                            local maxHealth = health:GetAttribute("MaxHealth") or health:GetAttribute("Max") or 100
+                            needsRepair = currentHealth < maxHealth
+                        end)
+                        if needsRepair then
+                            table.insert(buildables, health)
+                            addedHealthObjects[health] = true
+                        end
                     end
                 end
             end
@@ -10002,6 +10206,22 @@ do -- // Sapper Section in Classes Tab
         local barricadesFolder = Workspace:FindFirstChild("Barricades")
         if barricadesFolder then
             for _, child in pairs(barricadesFolder:GetDescendants()) do
+                checkInstance(child)
+            end
+        end
+        
+        -- Search in Structures folder
+        local structuresFolder = Workspace:FindFirstChild("Structures")
+        if structuresFolder then
+            for _, child in pairs(structuresFolder:GetDescendants()) do
+                checkInstance(child)
+            end
+        end
+        
+        -- Search in Buildings folder
+        local buildingsFolder = Workspace:FindFirstChild("Buildings")
+        if buildingsFolder then
+            for _, child in pairs(buildingsFolder:GetDescendants()) do
                 checkInstance(child)
             end
         end
@@ -10085,8 +10305,8 @@ end -- end of Sapper Section in Classes Tab
 
 task.wait(0.1) -- Delay to prevent lag
 do -- // Anti-Grab & Shove Aura Section in Classes Tab
--- Anti Grab (Sapper) + Improved Shove Aura (RETRY EQUIP UNTIL FREED)
--- Maintains earlier behavior but will keep equipping weapon/tool while pinned/grabbed.
+-- Improved Shove Aura
+-- Auto shove zombies near you
 
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
@@ -10094,8 +10314,6 @@ local Workspace = workspace
 
 -- config
 local ToolNamesPriority = {"Carbine", "Navy Pistol", "Axe", "Pickaxe", "Baguette"}
-local AntiGrabPollRate = 0.05
-local AntiGrabRange = 12
 
 local ShoveAuraRange = 12
 local ShoveTargets = 3
@@ -10116,10 +10334,7 @@ ShoveHitboxExpanderTargets = ShoveHitboxExpanderTargets or 10
 ShoveHitboxExpanderDelay = ShoveHitboxExpanderDelay or 0.03
 ShoveHitboxAnimConnection = ShoveHitboxAnimConnection or nil
 AutoParrySapperMeleeEnabled = AutoParrySapperMeleeEnabled or false
-
-AntiGrabEnabled = false -- Global for keybind access
 ShoveAuraEnabled = false -- Global for keybind access
-local shoving = false
 
 local function safeWait(t)
     t = tonumber(t) or 0
@@ -10372,128 +10587,6 @@ local function FireShoveRemote(remote, agentPart, toolName)
     end
 end
 
--- ALWAYS try to keep equipping while pinned; if tool disappears keep retrying until freed
-local function StartShovingLoop(initialEquipName)
-    if shoving then return end
-    shoving = true
-
-    task.spawn(function()
-        local equippedName = initialEquipName
-        local remote = equippedName and GetToolRemoteByName(equippedName) or nil
-
-        while true do
-            -- If AntiGrab disabled externally, break out
-            if not AntiGrabEnabled then break end
-
-            -- If not currently pinned/grabbed, attempt a small confirmation window
-            if not CurrentPinnedOrGrabbed() then
-                local releaseConfirmed = true
-                -- require a few consecutive checks to avoid flicker issues
-                for i = 1, 4 do
-                    safeWait(AntiGrabPollRate) -- small pause per check
-                    if CurrentPinnedOrGrabbed() then
-                        releaseConfirmed = false
-                        break
-                    end
-                end
-                if releaseConfirmed then break end
-            end
-
-            -- ensure we have a valid equipped tool; if not, keep trying while still pinned (no time cap)
-            if not (equippedName and IsToolEquipped(equippedName)) then
-                local newName = TryEquipFromBackpack(0.6)
-                if newName then
-                    equippedName = newName
-                end
-                -- refresh remote after each attempt
-                remote = equippedName and GetToolRemoteByName(equippedName) or nil
-            end
-
-            -- if remote missing try to refresh but don't block long (keep trying across loop iterations)
-            if not remote and equippedName then
-                remote = GetToolRemoteByName(equippedName)
-            end
-
-            -- perform shove attempts if we have hrp and targets
-            local char = LocalPlayer.Character
-            local hrp = char and char:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                local targets = FindNearestAgentParts(hrp.Position, AntiGrabRange, 2)
-                for _, agentPart in ipairs(targets) do
-                    -- lightweight refresh of remote per-target
-                    if not remote and equippedName then
-                        remote = GetToolRemoteByName(equippedName)
-                    end
-                    if remote then
-                        FireShoveRemote(remote, agentPart, equippedName)
-                    end
-                end
-            end
-
-            task.wait(0.06)
-        end
-
-        shoving = false
-    end)
-end
-
--- monitor loop (debounced) — now notifies Kill Aura to disable/restore
-task.defer(function()
-    task.wait(3) -- Stagger start
-    local lastState = false
-    while true do
-        task.wait(AntiGrabPollRate)
-        if not AntiGrabEnabled then
-            -- if anti-grab got disabled while previously suppressing, try to unsuppress KillAura
-            if lastState then
-                pcall(function()
-                    local ka = (type(getgenv) == "function" and getgenv().KillAuraAPI) or _G.KillAuraAPI
-                    if ka and ka.unsuppress then ka.unsuppress() end
-                end)
-            end
-            lastState = false
-        else
-
-            local currentlyPinnedOrGrabbed = CurrentPinnedOrGrabbed()
-
-        -- transition: not grabbed -> grabbed
-        if currentlyPinnedOrGrabbed and not lastState then
-            -- try to equip aggressively once the state transitions
-            local equippedName = TryEquipFromBackpack(1.0)
-            StartShovingLoop(equippedName)
-
-            -- request Kill Aura be disabled while we're grabbed
-            pcall(function()
-                local ka = (type(getgenv) == "function" and getgenv().KillAuraAPI) or _G.KillAuraAPI
-                if ka and ka.suppress then ka.suppress() end
-            end)
-        end
-
-        -- ensure loop has started if pinned
-        if currentlyPinnedOrGrabbed and not shoving then
-            local equippedName = TryEquipFromBackpack(1.0)
-            StartShovingLoop(equippedName)
-
-            pcall(function()
-                local ka = (type(getgenv) == "function" and getgenv().KillAuraAPI) or _G.KillAuraAPI
-                if ka and ka.suppress then ka.suppress() end
-            end)
-        end
-
-            -- transition: grabbed -> released (use lastState to detect transition)
-            if (not currentlyPinnedOrGrabbed) and lastState then
-                -- Ask Kill Aura to restore previous state (after release)
-                pcall(function()
-                    local ka = (type(getgenv) == "function" and getgenv().KillAuraAPI) or _G.KillAuraAPI
-                    if ka and ka.unsuppress then ka.unsuppress() end
-                end)
-            end
-
-            lastState = currentlyPinnedOrGrabbed
-        end
-    end
-end)
-
 -- Shove Aura: unchanged aside from using the same robust remote lookup and gun/melee behavior
 local function RemoteFromToolInstance(tool)
     if not tool then return nil end
@@ -10556,30 +10649,125 @@ local function FireShove(remote, agentPart, toolName)
     end
 end
 
+-- ===== SHARED COORDINATION SYSTEM FOR KILL AURA + SHOVE AURA =====
+-- Prevents both systems from fighting over tool equipping
+-- Uses a shared state to coordinate their actions
+
+-- Shared state (accessible by both systems)
+_G.AuraCoordination = _G.AuraCoordination or {
+    lastEquipAttempt = 0,
+    equipCooldown = 0.5, -- Minimum time between equip attempts
+    currentEquipOwner = nil, -- "KillAura" or "ShoveAura" or nil
+    shoveAuraLastFire = 0, -- Track when Shove Aura last fired
+    killAuraLastFire = 0, -- Track when Kill Aura last fired
+}
+
+-- PERFORMANCE: Cache for Shove Aura remote (prevents expensive lookups every cycle)
+local ShoveAura_cachedRemote = nil
+local ShoveAura_cachedRemoteName = nil
+local ShoveAura_lastRemoteCheck = 0
+local SHOVE_AURA_REMOTE_CACHE_TIME = 2 -- Recheck remote every 2 seconds
+
+-- Get remote with caching - NO EQUIPPING (use whatever is currently available)
+-- When both auras are enabled, we don't fight over tools - we use what's equipped
+local function ShoveAura_getRemote()
+    local now = tick()
+    
+    -- Check if cache is still valid
+    if ShoveAura_cachedRemote and (now - ShoveAura_lastRemoteCheck) < SHOVE_AURA_REMOTE_CACHE_TIME then
+        -- Verify remote still exists
+        if ShoveAura_cachedRemote.Parent then
+            return ShoveAura_cachedRemote, ShoveAura_cachedRemoteName
+        end
+    end
+    
+    -- Try to get remote from currently equipped tool FIRST (no equipping)
+    local char = LocalPlayer.Character
+    if char then
+        local equipped = char:FindFirstChildOfClass("Tool")
+        if equipped then
+            local r = RemoteFromToolInstance(equipped)
+            if r then
+                ShoveAura_cachedRemote = r
+                ShoveAura_cachedRemoteName = equipped.Name
+                ShoveAura_lastRemoteCheck = now
+                return r, equipped.Name
+            end
+        end
+    end
+    
+    -- If Kill Aura is enabled, DON'T try to equip - let Kill Aura handle tools
+    if KillAuraEnabled and KillAura_AutoEquipMelee then
+        -- Just use any available remote from workspace or backpack (no equipping)
+        local remote, rname = GetBestToolRemoteAndName()
+        if remote then
+            ShoveAura_cachedRemote = remote
+            ShoveAura_cachedRemoteName = rname
+            ShoveAura_lastRemoteCheck = now
+            return remote, rname
+        end
+        return nil, nil
+    end
+    
+    -- Kill Aura not active or not auto-equipping - Shove Aura can try to get a tool
+    local remote, rname = GetBestToolRemoteAndName()
+    if remote then
+        ShoveAura_cachedRemote = remote
+        ShoveAura_cachedRemoteName = rname
+        ShoveAura_lastRemoteCheck = now
+        return remote, rname
+    end
+    
+    return nil, nil
+end
+
 task.defer(function()
     task.wait(3.5) -- Stagger start
     while true do
-        task.wait(ShoveAuraCooldown)
         if ShoveAuraEnabled then
             local char = LocalPlayer.Character
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
             if hrp then
-                local remote, rname = GetBestToolRemoteAndName()
-                if not remote then
-                    local equipName = TryEquipFromBackpack(0.6)
-                    remote = equipName and GetToolRemoteByName(equipName) or nil
-                    rname = rname or equipName
+                -- COORDINATION: Check if Kill Aura just fired (avoid overlapping)
+                local coord = _G.AuraCoordination
+                local now = tick()
+                local timeSinceKillAura = now - (coord.killAuraLastFire or 0)
+                
+                -- If Kill Aura fired very recently, add tiny offset to stagger attacks
+                if KillAuraEnabled and timeSinceKillAura < 0.03 then
+                    task.wait(0.02) -- Small stagger to prevent overlap
                 end
-
+                
+                -- Use cached remote lookup (fast, non-blocking)
+                local remote, rname = ShoveAura_getRemote()
+                
                 if remote then
                     local targets = FindNearestAgentParts(hrp.Position, ShoveAuraRange, ShoveTargets)
                     if #targets > 0 then
+                        -- Mark when Shove Aura fires
+                        coord.shoveAuraLastFire = tick()
+                        
+                        -- Fire shoves directly (no spawn needed - already non-blocking)
                         for _, part in ipairs(targets) do
                             FireShove(remote, part, rname)
                         end
                     end
                 end
             end
+            
+            -- COORDINATION: Adaptive cooldown based on Kill Aura state
+            if KillAuraEnabled then
+                -- When Kill Aura is also active, use slightly longer cooldown to share time
+                task.wait(math.max(ShoveAuraCooldown, 0.08))
+            else
+                -- Solo Shove Aura - use configured cooldown
+                task.wait(ShoveAuraCooldown)
+            end
+        else
+            -- Clear cache when disabled
+            ShoveAura_cachedRemote = nil
+            ShoveAura_cachedRemoteName = nil
+            task.wait(1) -- PERFORMANCE: Sleep longer when disabled
         end
     end
 end)
@@ -10697,7 +10885,6 @@ end
 task.defer(function()
     task.wait(4) -- Stagger start
     while true do
-        task.wait(0.08) -- Slightly reduced frequency
         if AutoParrySapperEnabled then
             local char = LocalPlayer.Character
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -10716,6 +10903,9 @@ task.defer(function()
                     end
                 end
             end
+            task.wait(0.08) -- Active: fast parry response
+        else
+            task.wait(1) -- PERFORMANCE: Sleep longer when disabled
         end
     end
 end)
@@ -10800,7 +10990,6 @@ end
 task.defer(function()
     task.wait(4.5) -- Stagger start
     while true do
-        task.wait(0.08) -- Slightly reduced frequency
         if AutoParrySapperMeleeEnabled then
             local char = LocalPlayer.Character
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -10816,32 +11005,12 @@ task.defer(function()
                     end
                 end
             end
+            task.wait(0.08) -- Active: fast parry response
+        else
+            task.wait(1) -- PERFORMANCE: Sleep longer when disabled
         end
     end
 end)
-
-local AntiGrabToggle = SapperSection:Toggle({
-    Title = "Anti Grab",
-    Flag = "Classes_AntiGrab",
-    Desc = "Will AutoMattically Shove The Zombie Grabbing You.",
-    Default = false,
-    Callback = function(v)
-        AntiGrabEnabled = v
-        if not v then shoving = false end
-        pcall(function()
-            if WindUI then
-                WindUI:Notify({
-                    Title = "Sapper — Anti Grab",
-                    Content = v and "Anti Grab Enabled" or "Anti Grab Disabled",
-                    Duration = 2,
-                    Icon = v and "shield-check" or "shield-off",
-                })
-            end
-        end)
-    end
-})
-_G.KatchiToggleElements = _G.KatchiToggleElements or {}
-_G.KatchiToggleElements.AntiGrab = AntiGrabToggle
 
 local ShoveAuraToggle = SapperSection:Toggle({
     Title = "Shove Aura",
@@ -11355,8 +11524,13 @@ do -- // Dracula (New) — auto melee remote scanner + robust ESP (Dracula + Sil
     task.defer(function()
         task.wait(5.5) -- Stagger start
         while true do
-            task.wait(2) -- Reduced frequency
-            ScanDraculaRemotes()
+            -- PERFORMANCE: Only scan when Dracula features are enabled
+            if HitDraculaEnabled or DraculaEspEnabled then
+                ScanDraculaRemotes()
+                task.wait(2) -- Active: scan every 2s
+            else
+                task.wait(5) -- PERFORMANCE: Sleep longer when disabled
+            end
         end
     end)
 
@@ -11555,8 +11729,12 @@ do -- // Dracula (New) — auto melee remote scanner + robust ESP (Dracula + Sil
     task.defer(function()
         task.wait(6) -- Stagger start
         while true do
-            task.wait(0.25) -- Reduced frequency
-            if SilverEspEnabled then pcall(updateSilverESP) end
+            if SilverEspEnabled then
+                pcall(updateSilverESP)
+                task.wait(0.25) -- Active: update every 0.25s
+            else
+                task.wait(2) -- PERFORMANCE: Sleep longer when disabled
+            end
         end
     end)
 
@@ -11566,10 +11744,16 @@ do -- // Dracula (New) — auto melee remote scanner + robust ESP (Dracula + Sil
     task.defer(function()
         task.wait(6.5) -- Stagger start
         while true do
+            if not HitDraculaEnabled and not DraculaEspEnabled then
+                -- PERFORMANCE: Sleep longer when both Dracula features disabled
+                task.wait(2)
+                continue
+            end
+            
             task.wait(DraculaLoopInterval)
             if not HitDraculaEnabled then
-                -- keep ESP in sync
-                pcall(updateDraculaESP)
+                -- keep ESP in sync (only if ESP enabled)
+                if DraculaEspEnabled then pcall(updateDraculaESP) end
                 continue
             end
 
@@ -16478,8 +16662,8 @@ VisualSection:Toggle({
     local flyStateConnection = nil -- Connection to enforce climbing state
     local flyMobileGui = nil -- Mobile UI for up/down buttons
     local flyLastMoveTime = 0 -- Track when player last moved (for anti-AFK)
-    local flyMobileUp = false -- Is mobile up button held
-    local flyMobileDown = false -- Is mobile down button held
+    flyMobileUp = false -- Is mobile up button held (global for noclip access)
+    flyMobileDown = false -- Is mobile down button held (global for noclip access)
     local flyAntiAfkRunning = false -- Anti-AFK loop flag
     local flyAntiAfkResetting = false -- True during anti-AFK state reset
 
@@ -16788,10 +16972,14 @@ VisualSection:Toggle({
                 flyBodyVelocity.Velocity = currentVel:Lerp(moveDirection, 0.2)
             end
             
-            -- Apply gyro to follow camera (Auto Look manages this externally when it has a target)
-            -- Only apply if FlyBodyGyro has torque (Auto Look sets it to 0 when it takes over)
-            if FlyBodyGyro and FlyBodyGyro.Parent and FlyBodyGyro.MaxTorque.Magnitude > 0 then
-                FlyBodyGyro.CFrame = camCF
+            -- Apply gyro to follow camera
+            -- Skip if Auto Look has a target (it controls the gyro directly)
+            if FlyBodyGyro and FlyBodyGyro.Parent then
+                if not (KillAuraAutoLook and KillAura_autoLookHasTarget) then
+                    -- Normal fly behavior: follow camera
+                    FlyBodyGyro.CFrame = camCF
+                end
+                -- If Auto Look has target, it sets CFrame in KillAura_performAutoLook
             end
         end)
     end
@@ -16909,76 +17097,421 @@ VisualSection:Toggle({
             end
         end
     })
-
-    -- === Noclip Bypass (Fly Only) ===
-    -- Uses __newindex hook to block server CFrame teleports + disables collision
-    -- Based on zxciaz's bypass method - blocks CFrame changes to HumanoidRootPart/Torso
-    local NoclipEnabled = false
-    local noclipConnection = nil
-    local noclipPositionTracker = nil
     
-    -- All parts that need collision disabled (R6 + R15 compatible)
+    -- Register Fly toggle for mobile button and keybinds
+    _G.KatchiToggleElements = _G.KatchiToggleElements or {}
+    _G.KatchiToggleElements.Fly = FlyToggle
+
+    -- === Visual Noclip Bypass v3 (CFrame Fly Method) ===
+    -- Based on cframefly method: anchor Head, move via CFrame (client-only)
+    -- Server doesn't see movement until we teleport on exit
+    
+    local NoclipEnabled = false
+    local noclipCFlyConn = nil
+    local noclipTeleportConn = nil
+    local noclipCollisionConn = nil
+    
+    -- State
+    -- noclipSpeed removed: now uses FlySpeed variable directly
+    local lastNoclipPosition = nil -- Where we are visually (client)
+    local serverNoclipPosition = nil -- Where server thinks we are
+    local isLoopTeleporting = false
+    local teleportEndTime = 0
+    local headWasAnchored = false
+    
+    -- New: Wall detection state
+    local isInsideWall = false
+    local wallEntryTime = 0 -- When we entered the wall
+    local WALL_COOLDOWN = 1 -- 1 second cooldown before teleporting after entering wall
+    local clearFrameCount = 0 -- Consecutive frames where we're clearly outside
+    local CLEAR_FRAMES_NEEDED = 5 -- Need to be clearly outside for 5 consecutive frames
+    
+    -- All parts for collision disable
     local NOCLIP_PARTS = {
         "Head", "Torso", "HumanoidRootPart",
-        -- R15 parts
         "UpperTorso", "LowerTorso",
         "LeftUpperArm", "LeftLowerArm", "LeftHand",
         "RightUpperArm", "RightLowerArm", "RightHand",
         "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
         "RightUpperLeg", "RightLowerLeg", "RightFoot",
-        -- R6 parts
         "Left Arm", "Right Arm", "Left Leg", "Right Leg",
     }
     
-    local function startNoclip()
-        if noclipConnection then return end -- Already running
+    -- Raycast params for wall detection
+    local noclipRayParams = nil
+    
+    local function setupNoclipRayParams()
+        noclipRayParams = RaycastParams.new()
+        noclipRayParams.FilterType = Enum.RaycastFilterType.Exclude
+        
+        -- Build filter list: local player, all other players, zombies
+        local filterList = {}
+        
+        -- Add local player character
+        local char = LocalPlayer.Character
+        if char then table.insert(filterList, char) end
+        
+        -- Add all other player characters
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr.Character and plr.Character ~= char then
+                table.insert(filterList, plr.Character)
+            end
+        end
+        
+        -- Add zombies folder (real zombie hitboxes)
+        local zombiesFolder = workspace:FindFirstChild("Zombies")
+        if zombiesFolder then table.insert(filterList, zombiesFolder) end
+        
+        -- Add Camera folder (visual zombie models)
+        local cameraFolder = workspace:FindFirstChild("Camera")
+        if cameraFolder then table.insert(filterList, cameraFolder) end
+        
+        noclipRayParams.FilterDescendantsInstances = filterList
+    end
+    
+    -- Check if position is inside/touching a collision wall or ceiling
+    -- Simple and aggressive: if ANY ray hits something close, we're "in" a wall
+    local function isInWall(pos)
+        -- Always refresh raycast params to catch new zombies/players
+        setupNoclipRayParams()
+        
+        -- Check many directions with short rays
+        local directions = {
+            -- Cardinal
+            Vector3.new(1, 0, 0), Vector3.new(-1, 0, 0),
+            Vector3.new(0, 0, 1), Vector3.new(0, 0, -1),
+            Vector3.new(0, 1, 0), Vector3.new(0, -1, 0),
+            -- Diagonals horizontal
+            Vector3.new(1, 0, 1).Unit, Vector3.new(1, 0, -1).Unit,
+            Vector3.new(-1, 0, 1).Unit, Vector3.new(-1, 0, -1).Unit,
+            -- Diagonals with Y
+            Vector3.new(1, 1, 0).Unit, Vector3.new(-1, 1, 0).Unit,
+            Vector3.new(0, 1, 1).Unit, Vector3.new(0, 1, -1).Unit,
+            Vector3.new(1, -1, 0).Unit, Vector3.new(-1, -1, 0).Unit,
+            Vector3.new(0, -1, 1).Unit, Vector3.new(0, -1, -1).Unit,
+        }
+        
+        -- If ANY direction hits a collidable part within 2 studs, consider inside
+        for _, dir in ipairs(directions) do
+            local result = workspace:Raycast(pos, dir * 2, noclipRayParams)
+            if result and result.Instance and result.Instance.CanCollide then
+                return true
+            end
+        end
+        
+        return false
+    end
+    
+    -- More strict check: are we CLEARLY outside? (no walls nearby at all)
+    -- This is VERY conservative to avoid teleporting while still inside
+    local function isClearlyOutside(pos)
+        -- Always refresh raycast params to catch new zombies/players
+        setupNoclipRayParams()
+        
+        -- Check all 18 directions with longer rays - must have NO hits to be clearly outside
+        local directions = {
+            -- Cardinal horizontal
+            Vector3.new(1, 0, 0), Vector3.new(-1, 0, 0),
+            Vector3.new(0, 0, 1), Vector3.new(0, 0, -1),
+            -- Diagonal horizontal
+            Vector3.new(1, 0, 1).Unit, Vector3.new(1, 0, -1).Unit,
+            Vector3.new(-1, 0, 1).Unit, Vector3.new(-1, 0, -1).Unit,
+            -- Vertical
+            Vector3.new(0, 1, 0), Vector3.new(0, -1, 0),
+            -- Diagonal with Y
+            Vector3.new(1, 1, 0).Unit, Vector3.new(-1, 1, 0).Unit,
+            Vector3.new(0, 1, 1).Unit, Vector3.new(0, 1, -1).Unit,
+            Vector3.new(1, -1, 0).Unit, Vector3.new(-1, -1, 0).Unit,
+            Vector3.new(0, -1, 1).Unit, Vector3.new(0, -1, -1).Unit,
+        }
+        
+        -- Check ALL directions with 4 stud rays - must have ZERO hits
+        for _, dir in ipairs(directions) do
+            local result = workspace:Raycast(pos, dir * 4, noclipRayParams)
+            if result and result.Instance and result.Instance.CanCollide then
+                return false -- Still near something solid
+            end
+        end
+        
+        return true -- No walls nearby in any direction, clearly outside
+    end
+    
+    -- Check if position would be underground
+    local function isUnderground(pos)
+        if not noclipRayParams then setupNoclipRayParams() end
+        
+        local char = LocalPlayer.Character
+        noclipRayParams.FilterDescendantsInstances = char and {char} or {}
+        
+        -- Raycast down to find the floor
+        local floorCheck = workspace:Raycast(pos, Vector3.new(0, -500, 0), noclipRayParams)
+        
+        if floorCheck and floorCheck.Instance then
+            -- Check if the floor is Terrain (ground)
+            if floorCheck.Instance:IsA("Terrain") then
+                -- We're below terrain level if floor is above us
+                return floorCheck.Distance < 0.1 or pos.Y < floorCheck.Position.Y
+            end
+        end
+        
+        -- Also check: raycast up - if we hit terrain above us, we're underground
+        local ceilingCheck = workspace:Raycast(pos, Vector3.new(0, 500, 0), noclipRayParams)
+        if ceilingCheck and ceilingCheck.Instance and ceilingCheck.Instance:IsA("Terrain") then
+            return true -- Terrain above us means underground
+        end
+        
+        return false
+    end
+    
+    -- Loop teleport to position
+    local function noclipLoopTP(targetPos, duration)
+        isLoopTeleporting = true
+        teleportEndTime = tick() + (duration or 1)
+        
+        if noclipTeleportConn then
+            noclipTeleportConn:Disconnect()
+        end
+        
+        noclipTeleportConn = RunService.Heartbeat:Connect(function()
+            if not isLoopTeleporting or tick() > teleportEndTime then
+                isLoopTeleporting = false
+                if noclipTeleportConn then
+                    noclipTeleportConn:Disconnect()
+                    noclipTeleportConn = nil
+                end
+                return
+            end
+            
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local rot = hrp.CFrame - hrp.CFrame.Position
+                hrp.CFrame = CFrame.new(targetPos) * rot
+            end
+        end)
+    end
+    
+    local function stopNoclipLoopTP()
+        isLoopTeleporting = false
+        if noclipTeleportConn then
+            noclipTeleportConn:Disconnect()
+            noclipTeleportConn = nil
+        end
+    end
+    
+    -- Enter CFrame fly mode (when going into a wall)
+    local function enterCFrameMode()
+        if headWasAnchored then return end -- Already in CFrame mode
         
         local char = LocalPlayer.Character
         if not char then return end
         
-        -- Enable the hook-based CFrame bypass
-        _G.NoclipBypassEnabled = true
-        
-        -- Store initial position for fallback
+        local head = char:FindFirstChild("Head")
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
         local hrp = char:FindFirstChild("HumanoidRootPart")
-        if hrp then
-            _G.NoclipLastValidPosition = hrp.Position
+        
+        if not head or not humanoid or not hrp then return end
+        
+        -- Store server position before entering wall
+        serverNoclipPosition = hrp.Position
+        lastNoclipPosition = hrp.Position
+        
+        -- Enable CFrame fly mode
+        humanoid.PlatformStand = true
+        head.Anchored = true
+        headWasAnchored = true
+        
+        isInsideWall = true
+        wallEntryTime = tick()
+    end
+    
+    -- Exit CFrame fly mode (when leaving a wall)
+    local function exitCFrameMode()
+        if not headWasAnchored then return end -- Not in CFrame mode
+        
+        local char = LocalPlayer.Character
+        if not char then return end
+        
+        local head = char:FindFirstChild("Head")
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        
+        -- Restore character state
+        if head then
+            head.Anchored = false
         end
         
-        -- Position tracker - stores last valid position periodically for restoration
-        noclipPositionTracker = RunService.Heartbeat:Connect(function()
-            if NoclipEnabled and FlyEnabled then
-                local character = LocalPlayer.Character
-                if character then
-                    local root = character:FindFirstChild("HumanoidRootPart")
-                    if root then
-                        _G.NoclipLastValidPosition = root.Position
+        if humanoid then
+            humanoid.PlatformStand = false
+        end
+        
+        headWasAnchored = false
+        isInsideWall = false
+        
+        -- Teleport to current visual position
+        if lastNoclipPosition then
+            noclipLoopTP(lastNoclipPosition, 1)
+        end
+    end
+    
+    local function startNoclip()
+        if noclipCFlyConn then return end
+        
+        local char = LocalPlayer.Character
+        if not char then return end
+        
+        local head = char:FindFirstChild("Head")
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        
+        if not head or not humanoid or not hrp then return end
+        
+        _G.NoclipBypassEnabled = true
+        setupNoclipRayParams()
+        
+        -- Initialize positions (don't enter CFrame mode yet)
+        serverNoclipPosition = hrp.Position
+        lastNoclipPosition = hrp.Position
+        isInsideWall = false
+        headWasAnchored = false
+        
+        -- Main loop - monitor wall entry/exit and handle CFrame movement when inside wall
+        -- Use RenderStepped for faster detection (runs before frame renders)
+        noclipCFlyConn = RunService.RenderStepped:Connect(function(deltaTime)
+            if not NoclipEnabled then return end
+            
+            local character = LocalPlayer.Character
+            if not character then return end
+            
+            local hum = character:FindFirstChildOfClass("Humanoid")
+            local headPart = character:FindFirstChild("Head")
+            local rootPart = character:FindFirstChild("HumanoidRootPart")
+            
+            if not hum or not headPart or not rootPart then return end
+            
+            -- Get current position
+            local currentPos = headWasAnchored and headPart.Position or rootPart.Position
+            
+            -- Check if we're in a wall
+            local inWall = isInWall(currentPos)
+            
+            if inWall and not isInsideWall then
+                -- Just entered a wall - start CFrame mode
+                clearFrameCount = 0 -- Reset clear counter
+                enterCFrameMode()
+            elseif isInsideWall then
+                -- We're in CFrame mode - check if cooldown passed before checking wall exit
+                local timeInWall = tick() - wallEntryTime
+                if timeInWall >= WALL_COOLDOWN then
+                    -- Cooldown passed, NOW we can check if we CLEARLY left the wall
+                    -- Use stricter check - must have NO walls nearby to exit
+                    if isClearlyOutside(currentPos) then
+                        -- We're clearly outside - increment counter
+                        clearFrameCount = clearFrameCount + 1
+                        if clearFrameCount >= CLEAR_FRAMES_NEEDED then
+                            -- Been clearly outside for multiple frames, safe to exit
+                            exitCFrameMode()
+                            clearFrameCount = 0
+                        end
+                    else
+                        -- Still near a wall, reset counter
+                        clearFrameCount = 0
                     end
                 end
+                -- If cooldown not passed OR still near walls, stay in CFrame mode
             end
+            
+            -- If in CFrame mode (inside wall), handle movement
+            if headWasAnchored then
+                -- Keep anchored and platform stand
+                if not headPart.Anchored then headPart.Anchored = true end
+                if not hum.PlatformStand then hum.PlatformStand = true end
+                
+                -- Get movement from humanoid MoveDirection
+                local moveDirection = hum.MoveDirection * (FlySpeed * deltaTime)
+                
+                -- Check keyboard for vertical movement
+                local verticalMove = 0
+                if UserInputService:IsKeyDown(Enum.KeyCode.E) then
+                    verticalMove = FlySpeed * deltaTime
+                elseif UserInputService:IsKeyDown(Enum.KeyCode.Q) then
+                    verticalMove = -FlySpeed * deltaTime
+                end
+                
+                -- Mobile up/down buttons
+                if flyMobileUp then
+                    verticalMove = FlySpeed * deltaTime
+                elseif flyMobileDown then
+                    verticalMove = -FlySpeed * deltaTime
+                end
+                
+                local headCFrame = headPart.CFrame
+                local camera = workspace.CurrentCamera
+                local cameraCFrame = camera.CFrame
+                
+                -- Calculate camera offset relative to head
+                local cameraOffset = headCFrame:ToObjectSpace(cameraCFrame).Position
+                cameraCFrame = cameraCFrame * CFrame.new(-cameraOffset.X, -cameraOffset.Y, -cameraOffset.Z + 1)
+                
+                local cameraPosition = cameraCFrame.Position
+                local headPosition = headCFrame.Position
+                
+                -- Convert movement to camera-relative
+                local objectSpaceVelocity = CFrame.new(cameraPosition, Vector3.new(headPosition.X, cameraPosition.Y, headPosition.Z)):VectorToObjectSpace(moveDirection)
+                
+                -- Add vertical movement
+                objectSpaceVelocity = objectSpaceVelocity + Vector3.new(0, verticalMove, 0)
+                
+                -- Calculate new position
+                local newPos = headPosition + (cameraCFrame - cameraPosition):VectorToWorldSpace(objectSpaceVelocity)
+                
+                -- Prevent going underground
+                if isUnderground(newPos) then
+                    -- Block downward movement, only allow horizontal and upward
+                    if objectSpaceVelocity.Y < 0 then
+                        objectSpaceVelocity = Vector3.new(objectSpaceVelocity.X, 0, objectSpaceVelocity.Z)
+                    end
+                    -- Recalculate position
+                    newPos = headPosition + (cameraCFrame - cameraPosition):VectorToWorldSpace(objectSpaceVelocity)
+                    
+                    -- If still underground, don't move at all
+                    if isUnderground(newPos) then
+                        newPos = headPosition
+                    end
+                end
+                
+                -- Move head via CFrame (client-only visual movement)
+                headPart.CFrame = CFrame.new(newPos) * (cameraCFrame - cameraPosition)
+                
+                -- Update last position
+                lastNoclipPosition = headPart.Position
+            else
+                -- Not in CFrame mode, just track position
+                lastNoclipPosition = rootPart.Position
+                serverNoclipPosition = rootPart.Position
+            end
+            
+            _G.NoclipLastValidPosition = serverNoclipPosition
         end)
         
-        -- Collision disabling loop (Stepped for high responsiveness)
-        noclipConnection = RunService.Stepped:Connect(function()
-            if NoclipEnabled and FlyEnabled then
-                local character = LocalPlayer.Character
-                if character then
-                    -- Disable collision on ALL character parts
-                    for _, partName in ipairs(NOCLIP_PARTS) do
-                        local part = character:FindFirstChild(partName)
-                        if part and part:IsA("BasePart") then
-                            pcall(function() part.CanCollide = false end)
-                        end
-                    end
-                    
-                    -- Also disable collision on any accessories/hats
-                    for _, child in pairs(character:GetChildren()) do
-                        if child:IsA("Accessory") or child:IsA("Hat") then
-                            local handle = child:FindFirstChild("Handle")
-                            if handle then
-                                pcall(function() handle.CanCollide = false end)
-                            end
-                        end
+        -- Collision disable loop
+        noclipCollisionConn = RunService.Stepped:Connect(function()
+            if not NoclipEnabled then return end
+            
+            local character = LocalPlayer.Character
+            if not character then return end
+            
+            for _, partName in ipairs(NOCLIP_PARTS) do
+                local part = character:FindFirstChild(partName)
+                if part and part:IsA("BasePart") then
+                    pcall(function() part.CanCollide = false end)
+                end
+            end
+            
+            for _, child in pairs(character:GetChildren()) do
+                if child:IsA("Accessory") or child:IsA("Hat") then
+                    local handle = child:FindFirstChild("Handle")
+                    if handle then
+                        pcall(function() handle.CanCollide = false end)
                     end
                 end
             end
@@ -16986,24 +17519,61 @@ VisualSection:Toggle({
     end
 
     local function stopNoclip()
-        -- Disable the hook-based CFrame bypass
         _G.NoclipBypassEnabled = false
         _G.NoclipLastValidPosition = nil
         
-        if noclipPositionTracker then
-            noclipPositionTracker:Disconnect()
-            noclipPositionTracker = nil
+        -- Get final position before cleanup
+        local finalPos = lastNoclipPosition
+        local wasInCFrameMode = headWasAnchored
+        
+        -- Clean up connections
+        if noclipCFlyConn then
+            noclipCFlyConn:Disconnect()
+            noclipCFlyConn = nil
         end
         
-        if noclipConnection then
-            noclipConnection:Disconnect()
-            noclipConnection = nil
+        if noclipCollisionConn then
+            noclipCollisionConn:Disconnect()
+            noclipCollisionConn = nil
         end
+        
+        -- Restore character state
+        local char = LocalPlayer.Character
+        if char then
+            local head = char:FindFirstChild("Head")
+            local humanoid = char:FindFirstChildOfClass("Humanoid")
+            
+            if head and headWasAnchored then
+                head.Anchored = false
+            end
+            
+            if humanoid then
+                humanoid.PlatformStand = false
+            end
+        end
+        
+        headWasAnchored = false
+        isInsideWall = false
+        
+        -- If we were in CFrame mode, teleport to final position
+        if wasInCFrameMode and finalPos then
+            noclipLoopTP(finalPos, 1)
+        end
+        
+        -- Reset state
+        lastNoclipPosition = nil
+        serverNoclipPosition = nil
     end
 
     -- Re-setup on respawn
     LocalPlayer.CharacterAdded:Connect(function(newChar)
-        if NoclipEnabled and FlyEnabled then
+        stopNoclipLoopTP()
+        lastNoclipPosition = nil
+        serverNoclipPosition = nil
+        headWasAnchored = false
+        isInsideWall = false
+        
+        if NoclipEnabled then
             task.wait(0.3)
             startNoclip()
         end
@@ -17012,9 +17582,9 @@ VisualSection:Toggle({
     local NoclipToggle = ServerModifiersSection:Toggle({
         Title = "Fly Noclip Bypass",
         Flag = "ServerMods_NoclipBypass",
-        Desc = "Walk through walls while flying (enable fly).",
+        Desc = "Fly through walls",
         Default = false,
-        Locked = true, -- Start locked until Fly is enabled
+        Locked = true,
         Callback = function(state)
             NoclipEnabled = state
             
@@ -17022,7 +17592,7 @@ VisualSection:Toggle({
                 startNoclip()
                 WindUI:Notify({
                     Title = "Server Modifiers",
-                    Content = "Noclip Bypass enabled.",
+                    Content = "Noclip enabled - walk into walls freely!",
                     Duration = 3,
                     Icon = "ghost",
                 })
@@ -17030,7 +17600,7 @@ VisualSection:Toggle({
                 stopNoclip()
                 WindUI:Notify({
                     Title = "Server Modifiers",
-                    Content = "Noclip Bypass disabled.",
+                    Content = "Noclip disabled.",
                     Duration = 2,
                     Icon = "ghost",
                 })
@@ -17239,16 +17809,36 @@ do -- // Maps Hacks Tab
         local char = LocalPlayer.Character
         if not char then return end
         
-        -- Find hammer in backpack or character
-        local hammer = LocalPlayer.Backpack:FindFirstChild("Hammer") 
-            or LocalPlayer.Backpack:FindFirstChild("Claw Hammer")
-            or char:FindFirstChild("Hammer")
-            or char:FindFirstChild("Claw Hammer")
+        -- Method 1: Check workspace.Players folder (where remotes actually are)
+        local hammerRemote = nil
+        local wsPlayers = Workspace:FindFirstChild("Players")
+        if wsPlayers then
+            local playerFolder = wsPlayers:FindFirstChild(LocalPlayer.Name)
+            if playerFolder then
+                local hammerFolder = playerFolder:FindFirstChild("Hammer") 
+                    or playerFolder:FindFirstChild("Claw Hammer")
+                if hammerFolder and hammerFolder:FindFirstChild("RemoteEvent") then
+                    hammerRemote = hammerFolder.RemoteEvent
+                end
+            end
+        end
         
-        if not hammer or not hammer:FindFirstChild("RemoteEvent") then return end
+        -- Method 2: Find hammer in backpack or character
+        if not hammerRemote then
+            local hammer = LocalPlayer.Backpack:FindFirstChild("Hammer") 
+                or LocalPlayer.Backpack:FindFirstChild("Claw Hammer")
+                or char:FindFirstChild("Hammer")
+                or char:FindFirstChild("Claw Hammer")
+            
+            if hammer and hammer:FindFirstChild("RemoteEvent") then
+                hammerRemote = hammer.RemoteEvent
+            end
+        end
+        
+        if not hammerRemote then return end
         
         pcall(function()
-            _G.SafeFireServer(hammer.RemoteEvent, "Repair", target)
+            _G.SafeFireServer(hammerRemote, "Repair", target)
         end)
     end
     
@@ -18153,9 +18743,156 @@ do -- // Keybinds and UI Tab
         Title = "How to use",
         Desc = "Click An Keybind Button And Bind A Key, On Mobile Ui Click The Toggle And A Ui Will Pop Up And You Can Use It To Toggle While Not In The Ui, Hold the button if you want to see the settings."
     })
+    
+    -- ===== RONIX KEYBIND FALLBACK =====
+    -- Some executors don't support WindUI's Keybind properly, this is a manual fallback
+    -- This reads the configured keybinds from the UI and listens for keypresses manually
+    local RonixKeybindEnabled = false
+    local RonixKeybindConnection = nil
+    
+    -- Store keybind element references (will be populated as keybinds are created)
+    local KeybindElements = {}
+    
+    -- Store the actual keybind values (KeyCode) directly when user sets them
+    local KeybindValues = {}
+    
+    -- Map flag names to toggle names and state getters
+    local KeybindFlagToToggle = {
+        ["Keybind_HeadHit"] = {"HeadHit", function() return HeadHitEnabled end},
+        ["Keybind_AutoJump"] = {"AutoJump", function() return LocalPlayer:GetAttribute("AutoJumpEnabled") or false end},
+        ["Keybind_HitboxExpander"] = {"HitboxExpander", function() return hitboxEnabled end},
+        ["Keybind_ShoveHitbox"] = {"ShoveHitbox", function() return ShoveHitboxExpanderEnabled end},
+        ["Keybind_AutoParrySapper"] = {"AutoParrySapper", function() return AutoParrySapperMeleeEnabled end},
+        ["Keybind_AutoShoot"] = {"AutoShoot", function() return USER_AUTO_SHOOT_TOGGLE end},
+        ["Keybind_InstantShoot"] = {"InstantShoot", function() return INSTANT_SHOOT_ENABLED end},
+        ["Keybind_UseFov"] = {"UseFov", function() return USE_FOV end},
+        ["Keybind_ShowFov"] = {"ShowFov", function() return SHOW_FOV end},
+        ["Keybind_WallCheck"] = {"WallCheck", function() return CHECK_WALLS end},
+        ["Keybind_AutoReload"] = {"AutoReload", function() return AUTO_RELOAD_ENABLED end},
+        ["Keybind_AutoSavePlayers"] = {"AutoSavePlayers", function() return AUTO_SAVE_PLAYERS_ENABLED end},
+        ["Keybind_KillAura"] = {"KillAura", function() return KillAuraEnabled end},
+        ["Keybind_Reach"] = {"Reach", function() return KillAura_HitboxExpanderEnabled end},
+        ["Keybind_AutoEquipMelee"] = {"AutoEquipMelee", function() return KillAura_AutoEquipMelee end},
+        ["Keybind_BayonetKillAura"] = {"BayonetKillAura", function() return KillAura_EnableBayonet end},
+        ["Keybind_AutoLook"] = {"AutoLook", function() return KillAuraAutoLook end},
+        ["Keybind_ShoveAura"] = {"ShoveAura", function() return ShoveAuraEnabled end},
+        ["Keybind_Fly"] = {"Fly", function() return FlyEnabled end},
+        ["Keybind_Noclip"] = {"NoclipBypass", function() return NoclipEnabled end},
+        ["Keybind_ApplyWalkSpeed"] = {"ApplyWalkSpeed", function() return walkLoopEnabled end},
+        ["Keybind_AutoRemoveHorses"] = {"AutoRemoveHorses", function() return AutoRemoveHorsesEnabled end},
+        ["Keybind_NoFallDamage"] = {"NoFallDamage", function() return noFallDamageEnabled end},
+    }
+    
+    -- Helper: Create a keybind with callback that also stores the value for Ronix fallback
+    local function createKeybindWithFallback(flagName, keybindConfig)
+        local originalCallback = keybindConfig.Callback
+        keybindConfig.Callback = function(keyName)
+            -- Store the KeyCode for Ronix fallback
+            if keyName and keyName ~= "" then
+                pcall(function()
+                    KeybindValues[flagName] = Enum.KeyCode[keyName]
+                end)
+            else
+                KeybindValues[flagName] = nil
+            end
+            -- Call original callback
+            if originalCallback then
+                originalCallback(keyName)
+            end
+        end
+        return KeybindsSection:Keybind(keybindConfig)
+    end
+    
+    local function startRonixKeybind()
+        if RonixKeybindConnection then return end
+        
+        RonixKeybindConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+            if gameProcessed then return end
+            if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+            
+            local pressedKey = input.KeyCode
+            
+            -- Check each stored keybind value
+            for flagName, keyCode in pairs(KeybindValues) do
+                if keyCode and keyCode == pressedKey then
+                    -- Found a match! Trigger the toggle
+                    local mapping = KeybindFlagToToggle[flagName]
+                    if mapping then
+                        local toggleName = mapping[1]
+                        local currentState = mapping[2]()
+                        local newState = not currentState
+                        local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements[toggleName]
+                        
+                        if toggle then
+                            -- Try multiple methods for compatibility with different executors
+                            local success = false
+                            
+                            -- Method 1: Try Set (WindUI standard)
+                            if not success and toggle.Set then
+                                success = pcall(function() toggle:Set(newState) end)
+                            end
+                            
+                            -- Method 2: Try Enable/Disable (Ronix compatible)
+                            if not success then
+                                if newState and toggle.Enable then
+                                    success = pcall(function() toggle:Enable() end)
+                                elseif not newState and toggle.Disable then
+                                    success = pcall(function() toggle:Disable() end)
+                                end
+                            end
+                            
+                            -- Method 3: Try Toggle method
+                            if not success and toggle.Toggle then
+                                success = pcall(function() toggle:Toggle() end)
+                            end
+                            
+                            -- Method 4: Try clicking/firing the toggle directly
+                            if not success and toggle.Callback then
+                                success = pcall(function() toggle.Callback(newState) end)
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+    end
+    
+    local function stopRonixKeybind()
+        if RonixKeybindConnection then
+            RonixKeybindConnection:Disconnect()
+            RonixKeybindConnection = nil
+        end
+    end
+    
+    KeybindsSection:Toggle({
+        Title = "Keybind for Ronix (Fallback)",
+        Flag = "Keybind_RonixFallback",
+        Desc = "Enable this if your executor's keybinds don't work. Uses the same keybinds you set below.",
+        Default = false,
+        Callback = function(v)
+            RonixKeybindEnabled = v
+            if v then
+                startRonixKeybind()
+                WindUI:Notify({
+                    Title = "Ronix Keybind",
+                    Content = "Fallback keybinds enabled - uses your configured keybinds",
+                    Duration = 3,
+                    Icon = "keyboard"
+                })
+            else
+                stopRonixKeybind()
+                WindUI:Notify({
+                    Title = "Ronix Keybind",
+                    Content = "Fallback keybinds disabled",
+                    Duration = 2,
+                    Icon = "keyboard-off"
+                })
+            end
+        end
+    })
 
     -- Head Hit Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_HeadHit"] = createKeybindWithFallback("Keybind_HeadHit", {
         Title = "Head Hit",
         Flag = "Keybind_HeadHit",
         Desc = "Toggle Head Hit feature",
@@ -18184,7 +18921,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Auto Jump Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_AutoJump"] = createKeybindWithFallback("Keybind_AutoJump", {
         Title = "Auto Jump",
         Flag = "Keybind_AutoJump",
         Desc = "Toggle Auto Jump feature",
@@ -18217,7 +18954,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Hitbox Expander Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_HitboxExpander"] = createKeybindWithFallback("Keybind_HitboxExpander", {
         Title = "Hitbox Expander",
         Flag = "Keybind_HitboxExpander",
         Desc = "Toggle Hitbox Expander feature",
@@ -18246,7 +18983,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Shove Hitbox Expander Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_ShoveHitbox"] = createKeybindWithFallback("Keybind_ShoveHitbox", {
         Title = "Shove Hitbox Expander",
         Flag = "Keybind_ShoveHitbox",
         Desc = "Toggle Shove Hitbox Expander feature",
@@ -18275,7 +19012,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Auto Parry Sapper Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_AutoParrySapper"] = createKeybindWithFallback("Keybind_AutoParrySapper", {
         Title = "Auto Parry Sapper",
         Flag = "Keybind_AutoParrySapper",
         Desc = "Toggle Auto Parry Sapper feature",
@@ -18304,7 +19041,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Enable Auto Shoot Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_AutoShoot"] = createKeybindWithFallback("Keybind_AutoShoot", {
         Title = "Auto Shoot",
         Flag = "Keybind_AutoShoot",
         Desc = "Toggle Auto Shoot feature",
@@ -18333,7 +19070,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Instant Shoot Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_InstantShoot"] = createKeybindWithFallback("Keybind_InstantShoot", {
         Title = "Instant Shoot",
         Flag = "Keybind_InstantShoot",
         Desc = "Toggle Instant Shoot feature",
@@ -18362,7 +19099,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Use FOV Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_UseFov"] = createKeybindWithFallback("Keybind_UseFov", {
         Title = "Use FOV",
         Flag = "Keybind_UseFov",
         Desc = "Toggle Use FOV feature",
@@ -18391,7 +19128,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Show FOV Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_ShowFov"] = createKeybindWithFallback("Keybind_ShowFov", {
         Title = "Show FOV",
         Flag = "Keybind_ShowFov",
         Desc = "Toggle Show FOV feature",
@@ -18420,7 +19157,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Wall Check Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_WallCheck"] = createKeybindWithFallback("Keybind_WallCheck", {
         Title = "Wall Check",
         Flag = "Keybind_WallCheck",
         Desc = "Toggle Wall Check feature",
@@ -18449,7 +19186,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Auto Reload Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_AutoReload"] = createKeybindWithFallback("Keybind_AutoReload", {
         Title = "Auto Reload",
         Flag = "Keybind_AutoReload",
         Desc = "Toggle Auto Reload feature",
@@ -18478,7 +19215,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Auto Save Players Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_AutoSavePlayers"] = createKeybindWithFallback("Keybind_AutoSavePlayers", {
         Title = "Auto Save Players",
         Flag = "Keybind_AutoSavePlayers",
         Desc = "Toggle Auto Save Players feature",
@@ -18507,7 +19244,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Kill Aura Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_KillAura"] = createKeybindWithFallback("Keybind_KillAura", {
         Title = "Kill Aura",
         Flag = "Keybind_KillAura",
         Desc = "Toggle Kill Aura feature",
@@ -18536,7 +19273,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Reach Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_Reach"] = createKeybindWithFallback("Keybind_Reach", {
         Title = "Reach",
         Flag = "Keybind_Reach",
         Desc = "Toggle Reach feature",
@@ -18565,7 +19302,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Auto Equip Melee Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_AutoEquipMelee"] = createKeybindWithFallback("Keybind_AutoEquipMelee", {
         Title = "Auto Equip Melee",
         Flag = "Keybind_AutoEquipMelee",
         Desc = "Toggle Auto Equip Melee feature",
@@ -18594,7 +19331,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Bayonet Kill Aura Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_BayonetKillAura"] = createKeybindWithFallback("Keybind_BayonetKillAura", {
         Title = "Bayonet Kill Aura",
         Flag = "Keybind_BayonetKillAura",
         Desc = "Toggle Bayonet Kill Aura feature",
@@ -18623,7 +19360,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Auto Look Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_AutoLook"] = createKeybindWithFallback("Keybind_AutoLook", {
         Title = "Auto Look",
         Flag = "Keybind_AutoLook",
         Desc = "Toggle Auto Look feature",
@@ -18651,37 +19388,8 @@ do -- // Keybinds and UI Tab
         end
     })
 
-    -- Anti Grab Keybind
-    KeybindsSection:Keybind({
-        Title = "Anti Grab",
-        Flag = "Keybind_AntiGrab",
-        Desc = "Toggle Anti Grab feature",
-        Value = "",
-        Callback = function()
-            pcall(function()
-                local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.AntiGrab
-                if toggle and toggle.Set then
-                    toggle:Set(not AntiGrabEnabled)
-                end
-            end)
-        end
-    })
-    KeybindsSection:Toggle({
-        Title = "Anti Grab Button UI",
-        Flag = "ButtonUI_AntiGrab",
-        Desc = "Create mobile button for Anti Grab",
-        Default = false,
-        Callback = function(v)
-            if v then
-                createMobileButton("AntiGrab", "AntiGrab", function() return AntiGrabEnabled end)
-            else
-                destroyMobileButton("AntiGrab")
-            end
-        end
-    })
-
     -- Shove Aura Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_ShoveAura"] = createKeybindWithFallback("Keybind_ShoveAura", {
         Title = "Shove Aura",
         Flag = "Keybind_ShoveAura",
         Desc = "Toggle Shove Aura feature",
@@ -18710,7 +19418,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Apply WalkSpeed Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_ApplyWalkSpeed"] = createKeybindWithFallback("Keybind_ApplyWalkSpeed", {
         Title = "Apply WalkSpeed",
         Flag = "Keybind_ApplyWalkSpeed",
         Desc = "Toggle Apply WalkSpeed feature",
@@ -18739,7 +19447,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Auto Remove Horses Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_AutoRemoveHorses"] = createKeybindWithFallback("Keybind_AutoRemoveHorses", {
         Title = "Auto Remove Horses",
         Flag = "Keybind_AutoRemoveHorses",
         Desc = "Toggle Auto Remove Horses feature",
@@ -18768,7 +19476,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- No Fall Damage Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_NoFallDamage"] = createKeybindWithFallback("Keybind_NoFallDamage", {
         Title = "No Fall Damage",
         Flag = "Keybind_NoFallDamage",
         Desc = "Toggle No Fall Damage feature",
@@ -18797,7 +19505,7 @@ do -- // Keybinds and UI Tab
     })
 
     -- Fly Keybind
-    KeybindsSection:Keybind({
+    KeybindElements["Keybind_Fly"] = createKeybindWithFallback("Keybind_Fly", {
         Title = "Fly",
         Flag = "Keybind_Fly",
         Desc = "Toggle Fly feature",
@@ -18821,6 +19529,35 @@ do -- // Keybinds and UI Tab
                 createMobileButton("Fly", "Fly", function() return FlyEnabled end)
             else
                 destroyMobileButton("Fly")
+            end
+        end
+    })
+    
+    -- Noclip Keybind
+    KeybindElements["Keybind_Noclip"] = createKeybindWithFallback("Keybind_Noclip", {
+        Title = "Noclip",
+        Flag = "Keybind_Noclip",
+        Desc = "Toggle Noclip feature (requires Fly enabled)",
+        Value = "",
+        Callback = function()
+            pcall(function()
+                local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.NoclipBypass
+                if toggle and toggle.Set then
+                    toggle:Set(not NoclipEnabled)
+                end
+            end)
+        end
+    })
+    KeybindsSection:Toggle({
+        Title = "Noclip Button UI",
+        Flag = "ButtonUI_Noclip",
+        Desc = "Create mobile button for Noclip",
+        Default = false,
+        Callback = function(v)
+            if v then
+                createMobileButton("Noclip", "NoclipBypass", function() return NoclipEnabled end)
+            else
+                destroyMobileButton("Noclip")
             end
         end
     })
