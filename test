@@ -16395,7 +16395,8 @@ local function startFOVLock()
         if not fovChangerEnabled then return end
         pcall(function()
             local cam = workspace.CurrentCamera
-            if cam and cam.FieldOfView ~= currentFOV then
+            if cam then
+                -- Always force set FOV every frame to prevent any game override
                 cam.FieldOfView = currentFOV
             end
         end)
@@ -17107,6 +17108,7 @@ VisualSection:Toggle({
     -- Server doesn't see movement until we teleport on exit
     
     local NoclipEnabled = false
+    _G.KatchiNoclipEnabled = false -- Global reference for keybinds
     local noclipCFlyConn = nil
     local noclipTeleportConn = nil
     local noclipCollisionConn = nil
@@ -17587,6 +17589,7 @@ VisualSection:Toggle({
         Locked = true,
         Callback = function(state)
             NoclipEnabled = state
+            _G.KatchiNoclipEnabled = state -- Update global reference for keybinds
             
             if state then
                 startNoclip()
@@ -19396,7 +19399,8 @@ do -- // Keybinds and UI Tab
             pcall(function()
                 local toggle = _G.KatchiToggleElements and _G.KatchiToggleElements.NoclipBypass
                 if toggle then
-                    toggle:Set(not NoclipEnabled)
+                    local currentState = _G.KatchiNoclipEnabled or false
+                    toggle:Set(not currentState)
                 end
             end)
         end
@@ -19408,7 +19412,7 @@ do -- // Keybinds and UI Tab
         Default = false,
         Callback = function(v)
             if v then
-                createMobileButton("Noclip", "NoclipBypass", function() return NoclipEnabled end)
+                createMobileButton("Noclip", "NoclipBypass", function() return _G.KatchiNoclipEnabled or false end)
             else
                 destroyMobileButton("Noclip")
             end
