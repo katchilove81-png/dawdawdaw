@@ -11012,6 +11012,765 @@ task.defer(function()
     end
 end)
 
+do -- // Anti-Grab & Shove Aura Section in Classes Tab
+-- Anti Grab (Sapper) + Improved Shove Aura (RETRY EQUIP UNTIL FREED)
+-- Maintains earlier behavior but will keep equipping weapon/tool while pinned/grabbed.
+
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local Workspace = workspace
+
+-- config
+local ToolNamesPriority = {"Carbine", "Navy Pistol", "Axe", "Pickaxe", "Baguette"}
+local AntiGrabPollRate = 0.05
+local AntiGrabRange = 12
+
+local ShoveAuraRange = 12
+local ShoveTargets = 3
+local ShoveAuraCooldown = 0.10
+local ShovePreferEquipped = true
+local AutoParrySapperEnabled = false
+
+-- Carbine/Navy combo settings
+local ComboStunRange = 15
+local ComboStunMaxTargets = 10
+local ComboStunDelay = 0.10
+
+-- Shove Hitbox Expander (detects shove animation and fires at extended range)
+-- Using global variables so UI can access them
+ShoveHitboxExpanderEnabled = ShoveHitboxExpanderEnabled or false
+ShoveHitboxExpanderRange = ShoveHitboxExpanderRange or 20
+ShoveHitboxExpanderTargets = ShoveHitboxExpanderTargets or 10
+ShoveHitboxExpanderDelay = ShoveHitboxExpanderDelay or 0.03
+ShoveHitboxAnimConnection = ShoveHitboxAnimConnection or nil
+AutoParrySapperMeleeEnabled = AutoParrySapperMeleeEnabled or false
+
+AntiGrabEnabled = false -- Global for keybind access
+ShoveAuraEnabled = false -- Global for keybind access
+local shoving = false
+
+local function safeWait(t)
+    t = tonumber(t) or 0
+    if t > 0 then task.wait(t) end
+end
+
+local function GetBackpack()
+    if not LocalPlayer then return nil end
+    return LocalPlayer:FindFirstChild("Backpack") or LocalPlayer:FindFirstChild("BackPack")
+end
+
+local function FindToolInstanceByName(toolName)
+    if not toolName or not LocalPlayer then return nil end
+    local char = LocalPlayer.Character
+    if char then
+        local t = char:FindFirstChild(toolName)
+        if t and t:IsA("Tool") then return t end
+    end
+    local bp = GetBackpack()
+    if bp then
+        local t = bp:FindFirstChild(toolName)
+        if t and t:IsA("Tool") then return t end
+    end
+    local wsPlayers = Workspace:FindFirstChild("Players")
+    if wsPlayers then
+        local folder = wsPlayers:FindFirstChild(LocalPlayer.Name)
+        if folder then
+            local t = folder:FindFirstChild(toolName)
+            if t and t:IsA("Tool") then return t end
+        end
+    end
+    return nil
+end
+
+local function TryEquipToolInstance(tool)
+    if not tool or not LocalPlayer then return false end
+    if LocalPlayer.Character and tool.Parent == LocalPlayer.Character then return true end
+
+    -- try humanoid:EquipTool
+    local char = LocalPlayer.Character
+    if char then
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            local ok = pcall(function() humanoid:EquipTool(tool) end)
+            if ok then
+                for i=1,8 do
+                    if tool.Parent == LocalPlayer.Character then return true end
+                    safeWait(0.05)
+                end
+            end
+        end
+    end
+
+    -- fallback parent
+    if LocalPlayer.Character then
+        local ok2 = pcall(function() tool.Parent = LocalPlayer.Character end)
+        if ok2 then
+            for i=1,8 do
+                if tool.Parent == LocalPlayer.Character then return true end
+                    safeWait(0.05)
+            end
+        end
+    end
+
+    -- Player:EquipTool if exists
+    if LocalPlayer and LocalPlayer.EquipTool then
+        local ok3 = pcall(function() LocalPlayer:EquipTool(tool) end)
+        if ok3 then
+            for i=1,8 do
+                if tool.Parent == LocalPlayer.Character then return true end
+                safeWait(0.05)
+            end
+        end
+    end
+
+    return false
+end
+
+local function TryEquipFromBackpack(timeout)
+    timeout = tonumber(timeout) or 0.8
+    local start = tick()
+    while tick() - start < timeout do
+        for _, name in ipairs(ToolNamesPriority) do
+            local candidate = FindToolInstanceByName(name)
+            if candidate and candidate:IsA("Tool") then
+                if LocalPlayer.Character and candidate.Parent == LocalPlayer.Character then
+                    return name
+                end
+                local ok = TryEquipToolInstance(candidate)
+                if ok then
+                    safeWait(0.06)
+                    return name
+                end
+            end
+        end
+        safeWait(0.06)
+    end
+    return nil
+end
+
+local function GetToolRemoteByName(toolName)
+    if not toolName then return nil end
+    local char = LocalPlayer.Character
+    local bp = GetBackpack()
+    local tool = (char and char:FindFirstChild(toolName)) or (bp and bp:FindFirstChild(toolName))
+    if tool and tool:FindFirstChild("RemoteEvent") then return tool.RemoteEvent end
+    local wsPlayers = Workspace:FindFirstChild("Players")
+    if wsPlayers and wsPlayers:FindFirstChild(LocalPlayer.Name) then
+        local folder = wsPlayers:FindFirstChild(LocalPlayer.Name)
+        local toolFolder = folder:FindFirstChild(toolName)
+        if toolFolder and toolFolder:FindFirstChild("RemoteEvent") then return toolFolder.RemoteEvent end
+    end
+    return nil
+end
+
+local function CollectZombiesForTargeting()
+    local zombiesFolder = Workspace:FindFirstChild("Zombies")
+    if not zombiesFolder then return {} end
+    local list = {}
+    local function collect(folder)
+        if not folder then return end
+        for _, z in ipairs(folder:GetChildren()) do
+            if z and z:IsA("Model") then
+                table.insert(list, z)
+            end
+        end
+    end
+    local agent = zombiesFolder:FindFirstChild("Agent")
+    local slim = zombiesFolder:FindFirstChild("Slim")
+    collect(agent)
+    collect(slim)
+    if #list == 0 then
+        collect(zombiesFolder)
+    end
+    return list
+end
+
+local function FindNearestAgentParts(pos, maxRange, n)
+    if not pos then return {} end
+    n = n or 1
+    local list = {}
+    for _, z in ipairs(CollectZombiesForTargeting()) do
+        local part = z:FindFirstChild("HumanoidRootPart") or z:FindFirstChildWhichIsA("BasePart")
+        if part then
+            local ok, d = pcall(function() return (part.Position - pos).Magnitude end)
+            if ok and d and d <= (maxRange or math.huge) then
+                table.insert(list, {part = part, dist = d, model = z})
+            end
+        end
+    end
+    table.sort(list, function(a,b) return a.dist < b.dist end)
+    local out = {}
+    for i=1, math.min(n, #list) do
+        table.insert(out, list[i].part)
+    end
+    return out
+end
+
+local function GetZombiesInComboRange(originPos, radius, maxTargets)
+    if not originPos then return {} end
+    radius = radius or ComboStunRange
+    maxTargets = maxTargets or ComboStunMaxTargets
+    local zombies = CollectZombiesForTargeting()
+    local list = {}
+    for _, z in ipairs(zombies) do
+        local hrp = z:FindFirstChild("HumanoidRootPart") or z:FindFirstChildWhichIsA("BasePart")
+        if hrp then
+            local d = (hrp.Position - originPos).Magnitude
+            if d <= radius then
+                table.insert(list, {model = z, part = hrp, dist = d})
+            end
+        end
+    end
+    table.sort(list, function(a,b) return a.dist < b.dist end)
+    local out = {}
+    for i=1, math.min(maxTargets, #list) do
+        table.insert(out, list[i])
+    end
+    return out
+end
+
+local function PerformGunStunCombo(remote, originPos)
+    if not remote or not originPos then return end
+    local targets = GetZombiesInComboRange(originPos, ComboStunRange, ComboStunMaxTargets)
+    for i, entry in ipairs(targets) do
+        if entry.model and entry.part then
+            pcall(function() _G.SafeFireServer(remote, "FeedbackStun", entry.model, entry.part.Position) end)
+            if i < #targets then safeWait(ComboStunDelay) end
+        end
+    end
+end
+
+-- make pinned/grabbed detection tolerant of numbers, numeric-strings, and booleans
+local function IsPinnedOrGrabbed(grabbedVal, pinVal)
+    if not grabbedVal and not pinVal then return false end
+
+    if grabbedVal and grabbedVal.Value ~= nil then
+        local v = grabbedVal.Value
+        if type(v) == "boolean" and v == true then return true end
+        local n = tonumber(v)
+        if n and n > 0 then return true end
+        -- also accept string "true"
+        if tostring(v):lower() == "true" then return true end
+    end
+
+    if pinVal and pinVal.Value ~= nil then
+        local v = pinVal.Value
+        if type(v) == "boolean" and v == true then return true end
+        local n = tonumber(v)
+        if n and n > 0 then return true end
+        if tostring(v) == "RunnerAttack" then return true end
+        if tostring(v):lower() == "true" then return true end
+    end
+
+    return false
+end
+
+-- Live-check helper (reads current Workspace user state each time)
+local function CurrentPinnedOrGrabbed()
+    local wsPlayers = Workspace:FindFirstChild("Players")
+    if not wsPlayers then return false end
+    local folder = wsPlayers:FindFirstChild(LocalPlayer and LocalPlayer.Name or "")
+    if not folder then return false end
+    local userStates = folder:FindFirstChild("UserStates")
+    if not userStates then return false end
+    local grabbedVal = userStates:FindFirstChild("Grabbed")
+    local pinVal = userStates:FindFirstChild("Pin")
+    return IsPinnedOrGrabbed(grabbedVal, pinVal)
+end
+
+local function IsToolEquipped(toolName)
+    if not toolName then return false end
+    if not LocalPlayer or not LocalPlayer.Character then return false end
+    return LocalPlayer.Character:FindFirstChild(toolName) ~= nil
+end
+
+local function FireShoveRemote(remote, agentPart, toolName)
+    if not remote then return end
+    local tname = tostring(toolName or ""):lower()
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    -- Baguette uses same shove mechanics as melee weapons
+    if tname == "carbine" or tname == "navy pistol" then
+        pcall(function() _G.SafeFireServer(remote, "Shove") end)
+        if hrp then PerformGunStunCombo(remote, hrp.Position) end
+    else
+        if not agentPart then return end
+        pcall(function() _G.SafeFireServer(remote, "FeedbackStun", agentPart.Parent, agentPart.Position) end)
+        pcall(function() _G.SafeFireServer(remote, "StopBraceBlock") end)
+    end
+end
+
+-- ALWAYS try to keep equipping while pinned; if tool disappears keep retrying until freed
+local function StartShovingLoop(initialEquipName)
+    if shoving then return end
+    shoving = true
+
+    task.spawn(function()
+        local equippedName = initialEquipName
+        local remote = equippedName and GetToolRemoteByName(equippedName) or nil
+
+        while true do
+            -- If AntiGrab disabled externally, break out
+            if not AntiGrabEnabled then break end
+
+            -- If not currently pinned/grabbed, attempt a small confirmation window
+            if not CurrentPinnedOrGrabbed() then
+                local releaseConfirmed = true
+                -- require a few consecutive checks to avoid flicker issues
+                for i = 1, 4 do
+                    safeWait(AntiGrabPollRate) -- small pause per check
+                    if CurrentPinnedOrGrabbed() then
+                        releaseConfirmed = false
+                        break
+                    end
+                end
+                if releaseConfirmed then break end
+            end
+
+            -- ensure we have a valid equipped tool; if not, keep trying while still pinned (no time cap)
+            if not (equippedName and IsToolEquipped(equippedName)) then
+                local newName = TryEquipFromBackpack(0.6)
+                if newName then
+                    equippedName = newName
+                end
+                -- refresh remote after each attempt
+                remote = equippedName and GetToolRemoteByName(equippedName) or nil
+            end
+
+            -- if remote missing try to refresh but don't block long (keep trying across loop iterations)
+            if not remote and equippedName then
+                remote = GetToolRemoteByName(equippedName)
+            end
+
+            -- perform shove attempts if we have hrp and targets
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local targets = FindNearestAgentParts(hrp.Position, AntiGrabRange, 2)
+                for _, agentPart in ipairs(targets) do
+                    -- lightweight refresh of remote per-target
+                    if not remote and equippedName then
+                        remote = GetToolRemoteByName(equippedName)
+                    end
+                    if remote then
+                        FireShoveRemote(remote, agentPart, equippedName)
+                    end
+                end
+            end
+
+            task.wait(0.06)
+        end
+
+        shoving = false
+    end)
+end
+
+-- monitor loop (debounced) — now notifies Kill Aura to disable/restore
+task.defer(function()
+    task.wait(3) -- Stagger start
+    local lastState = false
+    while true do
+        task.wait(AntiGrabPollRate)
+        if not AntiGrabEnabled then
+            -- if anti-grab got disabled while previously suppressing, try to unsuppress KillAura
+            if lastState then
+                pcall(function()
+                    local ka = (type(getgenv) == "function" and getgenv().KillAuraAPI) or _G.KillAuraAPI
+                    if ka and ka.unsuppress then ka.unsuppress() end
+                end)
+            end
+            lastState = false
+        else
+
+            local currentlyPinnedOrGrabbed = CurrentPinnedOrGrabbed()
+
+        -- transition: not grabbed -> grabbed
+        if currentlyPinnedOrGrabbed and not lastState then
+            -- try to equip aggressively once the state transitions
+            local equippedName = TryEquipFromBackpack(1.0)
+            StartShovingLoop(equippedName)
+
+            -- request Kill Aura be disabled while we're grabbed
+            pcall(function()
+                local ka = (type(getgenv) == "function" and getgenv().KillAuraAPI) or _G.KillAuraAPI
+                if ka and ka.suppress then ka.suppress() end
+            end)
+        end
+
+        -- ensure loop has started if pinned
+        if currentlyPinnedOrGrabbed and not shoving then
+            local equippedName = TryEquipFromBackpack(1.0)
+            StartShovingLoop(equippedName)
+
+            pcall(function()
+                local ka = (type(getgenv) == "function" and getgenv().KillAuraAPI) or _G.KillAuraAPI
+                if ka and ka.suppress then ka.suppress() end
+            end)
+        end
+
+            -- transition: grabbed -> released (use lastState to detect transition)
+            if (not currentlyPinnedOrGrabbed) and lastState then
+                -- Ask Kill Aura to restore previous state (after release)
+                pcall(function()
+                    local ka = (type(getgenv) == "function" and getgenv().KillAuraAPI) or _G.KillAuraAPI
+                    if ka and ka.unsuppress then ka.unsuppress() end
+                end)
+            end
+
+            lastState = currentlyPinnedOrGrabbed
+        end
+    end
+end)
+
+-- Shove Aura: unchanged aside from using the same robust remote lookup and gun/melee behavior
+local function RemoteFromToolInstance(tool)
+    if not tool then return nil end
+    if tool:FindFirstChild("RemoteEvent") then return tool.RemoteEvent end
+    local wsPlayers = Workspace:FindFirstChild("Players")
+    if wsPlayers and wsPlayers:FindFirstChild(LocalPlayer.Name) then
+        local folder = wsPlayers:FindFirstChild(LocalPlayer.Name)
+        local t = folder:FindFirstChild(tool.Name)
+        if t and t:FindFirstChild("RemoteEvent") then return t.RemoteEvent end
+    end
+    return nil
+end
+
+local function GetBestToolRemoteAndName()
+    if ShovePreferEquipped and LocalPlayer.Character then
+        local equipped = LocalPlayer.Character:FindFirstChildOfClass("Tool")
+        if equipped then
+            local r = RemoteFromToolInstance(equipped)
+            if r then return r, equipped.Name end
+        end
+    end
+
+    for _, name in ipairs(ToolNamesPriority) do
+        local charTool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild(name)
+        if charTool then
+            local r = RemoteFromToolInstance(charTool)
+            if r then return r, name end
+        end
+        local back = GetBackpack()
+        if back then
+            local btool = back:FindFirstChild(name)
+            if btool then
+                local r = RemoteFromToolInstance(btool)
+                if r then return r, name end
+            end
+        end
+        local wsPlayers = Workspace:FindFirstChild("Players")
+        if wsPlayers and wsPlayers:FindFirstChild(LocalPlayer.Name) then
+            local folder = wsPlayers:FindFirstChild(LocalPlayer.Name)
+            local ftool = folder:FindFirstChild(name)
+            if ftool and ftool:FindFirstChild("RemoteEvent") then return ftool.RemoteEvent, name end
+        end
+    end
+    return nil, nil
+end
+
+local function FireShove(remote, agentPart, toolName)
+    if not remote then return end
+    local tname = tostring(toolName or ""):lower()
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    -- Baguette uses same shove mechanics as melee weapons
+    if tname == "carbine" or tname == "navy pistol" then
+        pcall(function() _G.SafeFireServer(remote, "Shove") end)
+        if hrp then PerformGunStunCombo(remote, hrp.Position) end
+    else
+        if not agentPart then return end
+        pcall(function() _G.SafeFireServer(remote, "FeedbackStun", agentPart.Parent, agentPart.Position) end)
+        pcall(function() _G.SafeFireServer(remote, "StopBraceBlock") end)
+    end
+end
+
+task.defer(function()
+    task.wait(3.5) -- Stagger start
+    while true do
+        task.wait(ShoveAuraCooldown)
+        if ShoveAuraEnabled then
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local remote, rname = GetBestToolRemoteAndName()
+                if not remote then
+                    local equipName = TryEquipFromBackpack(0.6)
+                    remote = equipName and GetToolRemoteByName(equipName) or nil
+                    rname = rname or equipName
+                end
+
+                if remote then
+                    local targets = FindNearestAgentParts(hrp.Position, ShoveAuraRange, ShoveTargets)
+                    if #targets > 0 then
+                        for _, part in ipairs(targets) do
+                            FireShove(remote, part, rname)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- ===== SHOVE HITBOX EXPANDER - ANIMATION DETECTION =====
+-- Detects when player performs a shove animation and fires shoves at extended range
+-- Works exactly like Shove Aura but only triggers when you do a shove animation
+
+-- Helper: Check if animation name contains "shove" (case insensitive)
+local function IsShoveAnimation(track)
+    if not track then return false end
+    local name = track.Name or ""
+    if string.lower(name):find("shove") then return true end
+    -- Also check animation object name
+    local anim = track.Animation
+    if anim and anim.Name then
+        if string.lower(anim.Name):find("shove") then return true end
+    end
+    return false
+end
+
+-- Perform the extended shove (same logic as Shove Aura)
+local function PerformShoveHitboxExpander()
+    if not ShoveHitboxExpanderEnabled then return end
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    
+    -- Get remote and tool name (same as Shove Aura)
+    local remote, rname = GetBestToolRemoteAndName()
+    if not remote then return end
+    
+    -- Get zombies in extended range
+    local targets = FindNearestAgentParts(hrp.Position, ShoveHitboxExpanderRange, ShoveHitboxExpanderTargets)
+    if #targets == 0 then return end
+    
+    -- Fire at each target (same as Shove Aura)
+    for i, part in ipairs(targets) do
+        FireShove(remote, part, rname)
+        if i < #targets and ShoveHitboxExpanderDelay > 0 then
+            safeWait(ShoveHitboxExpanderDelay)
+        end
+    end
+end
+
+-- Animation detection callback
+local function OnShoveAnimationPlayed(track)
+    if not ShoveHitboxExpanderEnabled then return end
+    if not track then return end
+    
+    -- Check if this is a shove animation
+    if IsShoveAnimation(track) then
+        -- Fire extended shove immediately
+        task.spawn(function()
+            PerformShoveHitboxExpander()
+        end)
+    end
+end
+
+-- Attach animation watcher to humanoid
+local function AttachShoveHitboxWatcher()
+    -- Disconnect previous connection if exists
+    if ShoveHitboxAnimConnection then
+        pcall(function() ShoveHitboxAnimConnection:Disconnect() end)
+        ShoveHitboxAnimConnection = nil
+    end
+    
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    
+    -- Connect to AnimationPlayed
+    local ok, conn = pcall(function()
+        return hum.AnimationPlayed:Connect(OnShoveAnimationPlayed)
+    end)
+    if ok and conn then
+        ShoveHitboxAnimConnection = conn
+    end
+end
+
+-- Attach on character spawn
+LocalPlayer.CharacterAdded:Connect(function(newChar)
+    task.wait(0.2)
+    AttachShoveHitboxWatcher()
+end)
+
+-- Initial attach if character already loaded
+task.spawn(function()
+    task.wait(0.5)
+    AttachShoveHitboxWatcher()
+end)
+
+-- Auto Parry Zapper: spam BraceBlock when a zapper is close (uses ESP detection)
+local function FindNearestZapper(pos, maxRange)
+    local zombiesFolder = Workspace:FindFirstChild("Zombies")
+    if not zombiesFolder or not pos then return nil end
+    local nearest = nil
+    local nearestDist = math.huge
+    for _, z in ipairs(zombiesFolder:GetChildren()) do
+        if z and z:IsA("Model") and isZombieOfType and isZombieOfType(z, "Zapper") then
+            local part = z:FindFirstChild("HumanoidRootPart") or z:FindFirstChildWhichIsA("BasePart")
+            if part then
+                local d = (part.Position - pos).Magnitude
+                if d <= (maxRange or math.huge) and d < nearestDist then
+                    nearestDist = d
+                    nearest = part
+                end
+            end
+        end
+    end
+    return nearest, nearestDist
+end
+
+task.defer(function()
+    task.wait(4) -- Stagger start
+    while true do
+        task.wait(0.08) -- Slightly reduced frequency
+        if AutoParrySapperEnabled then
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local threshold = ShoveAuraEnabled and 5 or 10
+                local zapperPart, dist = FindNearestZapper(hrp.Position, threshold)
+                if zapperPart and dist and dist <= threshold then
+                    local remote, rname = GetBestToolRemoteAndName()
+                    if not remote then
+                        local equipName = TryEquipFromBackpack(0.4)
+                        remote = equipName and GetToolRemoteByName(equipName) or nil
+                        rname = rname or equipName
+                    end
+                    if remote then
+                        pcall(function() _G.SafeFireServer(remote, "BraceBlock") end)
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- Auto Parry Sapper (Melee only - Axe/Pickaxe): spam BraceBlock when any zombie is within 8 studs
+local function FindNearestZombieForParry(pos, maxRange)
+    local zombiesFolder = Workspace:FindFirstChild("Zombies")
+    if not zombiesFolder or not pos then return nil end
+    local nearest = nil
+    local nearestDist = math.huge
+    
+    -- Check in Agent folder (regular zombies)
+    local agentFolder = zombiesFolder:FindFirstChild("Agent")
+    if agentFolder then
+        for _, z in ipairs(agentFolder:GetChildren()) do
+            if z and z:IsA("Model") then
+                local part = z:FindFirstChild("HumanoidRootPart") or z:FindFirstChildWhichIsA("BasePart")
+                if part then
+                    local d = (part.Position - pos).Magnitude
+                    if d <= (maxRange or math.huge) and d < nearestDist then
+                        nearestDist = d
+                        nearest = part
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Also check Slim folder (Cuirassiers)
+    local slimFolder = zombiesFolder:FindFirstChild("Slim")
+    if slimFolder then
+        for _, z in ipairs(slimFolder:GetChildren()) do
+            if z and z:IsA("Model") then
+                local part = z:FindFirstChild("HumanoidRootPart") or z:FindFirstChildWhichIsA("BasePart")
+                if part then
+                    local d = (part.Position - pos).Magnitude
+                    if d <= (maxRange or math.huge) and d < nearestDist then
+                        nearestDist = d
+                        nearest = part
+                    end
+                end
+            end
+        end
+    end
+    
+    return nearest, nearestDist
+end
+
+-- Helper: Check if player has Axe or Pickaxe equipped
+local function HasMeleeEquipped()
+    local char = LocalPlayer.Character
+    if not char then return false, nil end
+    local tool = char:FindFirstChildOfClass("Tool")
+    if tool then
+        local name = tool.Name
+        if name == "Axe" or name == "Pickaxe" then
+            return true, name
+        end
+    end
+    return false, nil
+end
+
+-- Helper: Get remote for Axe or Pickaxe
+local function GetMeleeRemote()
+    local hasMelee, toolName = HasMeleeEquipped()
+    if not hasMelee then return nil, nil end
+    
+    local wsPlayers = Workspace:FindFirstChild("Players")
+    if wsPlayers then
+        local playerFolder = wsPlayers:FindFirstChild(LocalPlayer.Name)
+        if playerFolder then
+            local toolFolder = playerFolder:FindFirstChild(toolName)
+            if toolFolder then
+                local remote = toolFolder:FindFirstChild("RemoteEvent")
+                if remote then return remote, toolName end
+            end
+        end
+    end
+    return nil, nil
+end
+
+task.defer(function()
+    task.wait(4.5) -- Stagger start
+    while true do
+        task.wait(0.08) -- Slightly reduced frequency
+        if AutoParrySapperMeleeEnabled then
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local hasMelee, meleeName = HasMeleeEquipped()
+                if hasMelee then
+                    local zombiePart, dist = FindNearestZombieForParry(hrp.Position, 8)
+                    if zombiePart and dist and dist <= 8 then
+                        local remote = GetMeleeRemote()
+                        if remote then
+                            pcall(function() _G.SafeFireServer(remote, "BraceBlock") end)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+local AntiGrabToggle = SapperSection:Toggle({
+    Title = "Anti Grab",
+    Flag = "Classes_AntiGrab",
+    Desc = "Will AutoMattically Shove The Zombie Grabbing You.",
+    Default = false,
+    Callback = function(v)
+        AntiGrabEnabled = v
+        if not v then shoving = false end
+        pcall(function()
+            if WindUI then
+                WindUI:Notify({
+                    Title = "Sapper — Anti Grab",
+                    Content = v and "Anti Grab Enabled" or "Anti Grab Disabled",
+                    Duration = 2,
+                    Icon = v and "shield-check" or "shield-off",
+                })
+            end
+        end)
+    end
+})
+_G.KatchiToggleElements = _G.KatchiToggleElements or {}
+_G.KatchiToggleElements.AntiGrab = AntiGrabToggle
+
 local ShoveAuraToggle = SapperSection:Toggle({
     Title = "Shove Aura",
     Flag = "Sapper_ShoveAura",
