@@ -1800,6 +1800,10 @@ end
 
 local KATCHI_LOGO_URL = "https://raw.githubusercontent.com/katchilove81-png/dawdawdaw/refs/heads/main/1767175079960.png"
 
+-- Streamer Mode uses _G.StreamerMode set outside this script
+-- Example: _G.StreamerMode = true before running this script
+streamerModeEnabled = _G.StreamerMode == true
+
 local Window = WindUI:CreateWindow({
     Title = "Katchi Hub",
     Author = "by Yuki",
@@ -1811,8 +1815,7 @@ local Window = WindUI:CreateWindow({
     Icon = KATCHI_LOGO_URL,
     User = {
         Enabled = true,
-        Anonymous = false,
-        Callback = function() end,
+        Anonymous = _G.StreamerMode == true,
     },
 })
 
@@ -1900,7 +1903,7 @@ local Window = WindUI:CreateWindow({
 
     Window:SetIconSize(48)
     Window:Tag({
-        Title = "v4.5",
+        Title = "v4.6",
         Color = Color3.fromHex("#d9ff00") -- deep crimson
     })
     Window:Tag({
@@ -1932,13 +1935,13 @@ local Window = WindUI:CreateWindow({
     })
 
     InfoSection:Paragraph({
-        Title = "Katchi Hub v4.5",
+        Title = "Katchi Hub v4.6",
         Desc = "Professional Guts & BlackPowder Script Hub\nMade by Yuki\nExecutor: "..(identifyexecutor and identifyexecutor() or "Unknown"),
     })
 
     InfoSection:Paragraph({
         Title = "Changelogs",
-        Desc = "Features\n- Update!",
+        Desc = "Features\n- Added PVP feature!\n- Added Streamer Mode!",
     })
 
 -- Make sure this exists somewhere near the top of your script
@@ -10305,8 +10308,8 @@ end -- end of Sapper Section in Classes Tab
 
 task.wait(0.1) -- Delay to prevent lag
 do -- // Anti-Grab & Shove Aura Section in Classes Tab
--- Improved Shove Aura
--- Auto shove zombies near you
+-- Anti Grab (Sapper) + Improved Shove Aura (RETRY EQUIP UNTIL FREED)
+-- Maintains earlier behavior but will keep equipping weapon/tool while pinned/grabbed.
 
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
@@ -10314,6 +10317,8 @@ local Workspace = workspace
 
 -- config
 local ToolNamesPriority = {"Carbine", "Navy Pistol", "Axe", "Pickaxe", "Baguette"}
+local AntiGrabPollRate = 0.05
+local AntiGrabRange = 12
 
 local ShoveAuraRange = 12
 local ShoveTargets = 3
@@ -10334,7 +10339,10 @@ ShoveHitboxExpanderTargets = ShoveHitboxExpanderTargets or 10
 ShoveHitboxExpanderDelay = ShoveHitboxExpanderDelay or 0.03
 ShoveHitboxAnimConnection = ShoveHitboxAnimConnection or nil
 AutoParrySapperMeleeEnabled = AutoParrySapperMeleeEnabled or false
+
+AntiGrabEnabled = false -- Global for keybind access
 ShoveAuraEnabled = false -- Global for keybind access
+local shoving = false
 
 local function safeWait(t)
     t = tonumber(t) or 0
@@ -10586,6 +10594,128 @@ local function FireShoveRemote(remote, agentPart, toolName)
         pcall(function() _G.SafeFireServer(remote, "StopBraceBlock") end)
     end
 end
+
+-- ALWAYS try to keep equipping while pinned; if tool disappears keep retrying until freed
+local function StartShovingLoop(initialEquipName)
+    if shoving then return end
+    shoving = true
+
+    task.spawn(function()
+        local equippedName = initialEquipName
+        local remote = equippedName and GetToolRemoteByName(equippedName) or nil
+
+        while true do
+            -- If AntiGrab disabled externally, break out
+            if not AntiGrabEnabled then break end
+
+            -- If not currently pinned/grabbed, attempt a small confirmation window
+            if not CurrentPinnedOrGrabbed() then
+                local releaseConfirmed = true
+                -- require a few consecutive checks to avoid flicker issues
+                for i = 1, 4 do
+                    safeWait(AntiGrabPollRate) -- small pause per check
+                    if CurrentPinnedOrGrabbed() then
+                        releaseConfirmed = false
+                        break
+                    end
+                end
+                if releaseConfirmed then break end
+            end
+
+            -- ensure we have a valid equipped tool; if not, keep trying while still pinned (no time cap)
+            if not (equippedName and IsToolEquipped(equippedName)) then
+                local newName = TryEquipFromBackpack(0.6)
+                if newName then
+                    equippedName = newName
+                end
+                -- refresh remote after each attempt
+                remote = equippedName and GetToolRemoteByName(equippedName) or nil
+            end
+
+            -- if remote missing try to refresh but don't block long (keep trying across loop iterations)
+            if not remote and equippedName then
+                remote = GetToolRemoteByName(equippedName)
+            end
+
+            -- perform shove attempts if we have hrp and targets
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local targets = FindNearestAgentParts(hrp.Position, AntiGrabRange, 2)
+                for _, agentPart in ipairs(targets) do
+                    -- lightweight refresh of remote per-target
+                    if not remote and equippedName then
+                        remote = GetToolRemoteByName(equippedName)
+                    end
+                    if remote then
+                        FireShoveRemote(remote, agentPart, equippedName)
+                    end
+                end
+            end
+
+            task.wait(0.06)
+        end
+
+        shoving = false
+    end)
+end
+
+-- monitor loop (debounced) — now notifies Kill Aura to disable/restore
+task.defer(function()
+    task.wait(3) -- Stagger start
+    local lastState = false
+    while true do
+        task.wait(AntiGrabPollRate)
+        if not AntiGrabEnabled then
+            -- if anti-grab got disabled while previously suppressing, try to unsuppress KillAura
+            if lastState then
+                pcall(function()
+                    local ka = (type(getgenv) == "function" and getgenv().KillAuraAPI) or _G.KillAuraAPI
+                    if ka and ka.unsuppress then ka.unsuppress() end
+                end)
+            end
+            lastState = false
+        else
+
+            local currentlyPinnedOrGrabbed = CurrentPinnedOrGrabbed()
+
+        -- transition: not grabbed -> grabbed
+        if currentlyPinnedOrGrabbed and not lastState then
+            -- try to equip aggressively once the state transitions
+            local equippedName = TryEquipFromBackpack(1.0)
+            StartShovingLoop(equippedName)
+
+            -- request Kill Aura be disabled while we're grabbed
+            pcall(function()
+                local ka = (type(getgenv) == "function" and getgenv().KillAuraAPI) or _G.KillAuraAPI
+                if ka and ka.suppress then ka.suppress() end
+            end)
+        end
+
+        -- ensure loop has started if pinned
+        if currentlyPinnedOrGrabbed and not shoving then
+            local equippedName = TryEquipFromBackpack(1.0)
+            StartShovingLoop(equippedName)
+
+            pcall(function()
+                local ka = (type(getgenv) == "function" and getgenv().KillAuraAPI) or _G.KillAuraAPI
+                if ka and ka.suppress then ka.suppress() end
+            end)
+        end
+
+            -- transition: grabbed -> released (use lastState to detect transition)
+            if (not currentlyPinnedOrGrabbed) and lastState then
+                -- Ask Kill Aura to restore previous state (after release)
+                pcall(function()
+                    local ka = (type(getgenv) == "function" and getgenv().KillAuraAPI) or _G.KillAuraAPI
+                    if ka and ka.unsuppress then ka.unsuppress() end
+                end)
+            end
+
+            lastState = currentlyPinnedOrGrabbed
+        end
+    end
+end)
 
 -- Shove Aura: unchanged aside from using the same robust remote lookup and gun/melee behavior
 local function RemoteFromToolInstance(tool)
@@ -11011,6 +11141,29 @@ task.defer(function()
         end
     end
 end)
+
+local AntiGrabToggle = SapperSection:Toggle({
+    Title = "Anti Grab",
+    Flag = "Classes_AntiGrab",
+    Desc = "Will AutoMattically Shove The Zombie Grabbing You.",
+    Default = false,
+    Callback = function(v)
+        AntiGrabEnabled = v
+        if not v then shoving = false end
+        pcall(function()
+            if WindUI then
+                WindUI:Notify({
+                    Title = "Sapper Anti Grab",
+                    Content = v and "Anti Grab Enabled" or "Anti Grab Disabled",
+                    Duration = 2,
+                    Icon = v and "shield-check" or "shield-off",
+                })
+            end
+        end)
+    end
+})
+_G.KatchiToggleElements = _G.KatchiToggleElements or {}
+_G.KatchiToggleElements.AntiGrab = AntiGrabToggle
 
 local ShoveAuraToggle = SapperSection:Toggle({
     Title = "Shove Aura",
@@ -16581,6 +16734,152 @@ VisualSection:Toggle({
     end
 })
 
+-- ===== STREAMER MODE =====
+-- Anonymizes all player names including your own for privacy while streaming
+-- streamerModeEnabled and streamerModeIconDisabled are declared globally near Window creation
+local originalNames = {} -- Store original names: {player = originalName}
+local streamerModeConnections = {}
+local anonymousNamePool = {
+    "Player", "Gamer", "Soldier", "Warrior", "Fighter", "Guardian", "Knight", "Scout",
+    "Hunter", "Ranger", "Trooper", "Captain", "Sergeant", "Private", "Recruit", "Veteran",
+    "Hero", "Champion", "Legend", "Rookie", "Streamer", "Viewer", "Subscriber", "Chatter",
+    "Anonymous", "Mystery", "Unknown", "Hidden", "Secret", "Shadow", "Ghost", "Phantom",
+    "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel",
+    "RedTeam", "BlueTeam", "GreenTeam", "YellowTeam", "OrangeTeam", "PurpleTeam"
+}
+
+local function generateRandomName()
+    local baseName = anonymousNamePool[math.random(1, #anonymousNamePool)]
+    local suffix = math.random(1000, 9999)
+    return baseName .. suffix
+end
+
+local function getAnonymousName(player)
+    -- Generate consistent anonymous name per player (so it doesn't keep changing)
+    if not originalNames[player] then
+        originalNames[player] = {
+            original = player.DisplayName or player.Name,
+            anonymous = generateRandomName()
+        }
+    end
+    return originalNames[player].anonymous
+end
+
+local function applyStreamerModeToPlayer(player)
+    if not streamerModeEnabled then return end
+    if not player or not player.Character then return end
+    
+    local anonymousName = getAnonymousName(player)
+    
+    -- Find and modify all name displays on the character
+    pcall(function()
+        local char = player.Character
+        
+        -- Look for Humanoid and modify DisplayName (visual only, doesn't affect actual name)
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            pcall(function()
+                humanoid.DisplayName = anonymousName
+            end)
+        end
+        
+        -- Look for any BillboardGui with name labels
+        for _, gui in ipairs(char:GetDescendants()) do
+            if gui:IsA("BillboardGui") then
+                for _, label in ipairs(gui:GetDescendants()) do
+                    if label:IsA("TextLabel") or label:IsA("TextButton") then
+                        -- Check if label contains the player's name
+                        local text = label.Text or ""
+                        if text:find(player.Name) or text:find(player.DisplayName or "") then
+                            label.Text = text:gsub(player.Name, anonymousName):gsub(player.DisplayName or player.Name, anonymousName)
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
+
+local function restorePlayerName(player)
+    if not player or not player.Character then return end
+    
+    local data = originalNames[player]
+    if not data then return end
+    
+    pcall(function()
+        local char = player.Character
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            pcall(function()
+                humanoid.DisplayName = data.original
+            end)
+        end
+    end)
+end
+
+local function applyStreamerModeToAllPlayers()
+    for _, player in ipairs(Players:GetPlayers()) do
+        applyStreamerModeToPlayer(player)
+    end
+end
+
+local function restoreAllPlayerNames()
+    for _, player in ipairs(Players:GetPlayers()) do
+        restorePlayerName(player)
+    end
+    originalNames = {}
+end
+
+local function setupStreamerModeConnections()
+    -- Clean up existing connections
+    for _, conn in ipairs(streamerModeConnections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    streamerModeConnections = {}
+    
+    if not streamerModeEnabled then return end
+    
+    -- Apply to new players
+    table.insert(streamerModeConnections, Players.PlayerAdded:Connect(function(player)
+        player.CharacterAdded:Connect(function()
+            task.wait(0.5)
+            applyStreamerModeToPlayer(player)
+        end)
+    end))
+    
+    -- Re-apply when characters respawn
+    for _, player in ipairs(Players:GetPlayers()) do
+        table.insert(streamerModeConnections, player.CharacterAdded:Connect(function()
+            task.wait(0.5)
+            applyStreamerModeToPlayer(player)
+        end))
+    end
+    
+    -- Periodic refresh to catch any reset names
+    table.insert(streamerModeConnections, RunService.Heartbeat:Connect(function()
+        if not streamerModeEnabled then return end
+        -- Only refresh every ~2 seconds to avoid performance issues
+        if tick() % 2 < 0.016 then
+            applyStreamerModeToAllPlayers()
+        end
+    end))
+end
+
+-- Auto-enable streamer mode if _G.StreamerMode is true
+if streamerModeEnabled then
+    task.defer(function()
+        task.wait(0.5) -- Wait for UI to initialize
+        applyStreamerModeToAllPlayers()
+        setupStreamerModeConnections()
+        WindUI:Notify({
+            Title = "Streamer Mode",
+            Content = "Enabled - All player names are anonymous",
+            Duration = 3,
+            Icon = "eye-off"
+        })
+    end)
+end
+
     -- === Server Modifiers ===
     noFallDamageEnabled = false -- Global for keybind access
     noFallDamageThread = nil -- Global for keybind access
@@ -18223,6 +18522,404 @@ do -- // Maps Hacks Tab
 end
 
 task.wait(0.1) -- Delay to prevent lag
+do -- // PVP Tab
+    local PVPTab = Main1Section:Tab({ Title = "PVP", Icon = "swords" })
+    
+    local PVPSection = PVPTab:Section({
+        Title = "Player Combat",
+        Icon = "crosshair",
+        Opened = true
+    })
+    
+    -- ===== PVP FEATURES =====
+    local Players = game:GetService("Players")
+    local RunService = game:GetService("RunService")
+    local LocalPlayer = Players.LocalPlayer
+    
+    -- Shared PVP Settings (used by both Melee and Bayonet)
+    local PVP_RANGE = 15
+    local PVP_DELAY = 0.05
+    local PVP_MULTI_TARGET = 3
+    
+    -- PVP Kill Aura (Melee)
+    local pvpMeleeEnabled = false
+    local pvpMeleeConn = nil
+    
+    local function getMeleeWeapon()
+        local char = LocalPlayer.Character
+        if not char then return nil end
+        
+        for _, tool in ipairs(char:GetChildren()) do
+            if tool:IsA("Tool") and tool:FindFirstChild("MeleeBase") then
+                return tool
+            end
+        end
+        
+        for _, tool in ipairs(LocalPlayer.Backpack:GetChildren()) do
+            if tool:IsA("Tool") and tool:FindFirstChild("MeleeBase") then
+                return tool
+            end
+        end
+        
+        return nil
+    end
+    
+    local function getPlayerDistance(target)
+        local char = LocalPlayer.Character
+        if not char or not target or not target:FindFirstChild("HumanoidRootPart") then
+            return math.huge
+        end
+        local myRoot = char:FindFirstChild("HumanoidRootPart")
+        if not myRoot then return math.huge end
+        return (target.HumanoidRootPart.Position - myRoot.Position).Magnitude
+    end
+    
+    local function isSameTeam(targetPlayer)
+        if not LocalPlayer.Team or not targetPlayer.Team then
+            return false
+        end
+        return LocalPlayer.Team == targetPlayer.Team
+    end
+    
+    local function attackPlayerMelee(targetPlayer)
+        if not targetPlayer or not targetPlayer.Character then return end
+        if isSameTeam(targetPlayer) then return end
+        
+        local weapon = getMeleeWeapon()
+        if not weapon then return end
+        
+        local char = LocalPlayer.Character
+        if not char then return end
+        
+        if weapon.Parent ~= char then
+            weapon.Parent = char
+            task.wait(0.1)
+        end
+        
+        local remoteEvent = weapon:FindFirstChild("RemoteEvent")
+        if not remoteEvent then return end
+        
+        pcall(function()
+            remoteEvent:FireServer("PrepareSwing")
+            remoteEvent:FireServer("Swing", "Side")
+            local head = targetPlayer.Character:FindFirstChild("Head")
+            if head then
+                remoteEvent:FireServer("HitPlayer", targetPlayer.Character:FindFirstChild("Humanoid"), head.Position)
+            end
+        end)
+    end
+    
+    -- Get sorted list of nearby enemy players
+    local function getNearbyEnemyPlayers(range, maxTargets)
+        local targets = {}
+        local char = LocalPlayer.Character
+        if not char then return targets end
+        local myRoot = char:FindFirstChild("HumanoidRootPart")
+        if not myRoot then return targets end
+        
+        for _, targetPlayer in ipairs(Players:GetPlayers()) do
+            if targetPlayer ~= LocalPlayer and targetPlayer.Character then
+                local targetHumanoid = targetPlayer.Character:FindFirstChild("Humanoid")
+                local targetRoot = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+                if targetHumanoid and targetHumanoid.Health > 0 and targetRoot and not isSameTeam(targetPlayer) then
+                    local dist = (targetRoot.Position - myRoot.Position).Magnitude
+                    if dist <= range then
+                        table.insert(targets, {player = targetPlayer, dist = dist})
+                    end
+                end
+            end
+        end
+        
+        -- Sort by distance (closest first)
+        table.sort(targets, function(a, b) return a.dist < b.dist end)
+        
+        -- Return up to maxTargets
+        local result = {}
+        for i = 1, math.min(#targets, maxTargets) do
+            table.insert(result, targets[i].player)
+        end
+        return result
+    end
+    
+    local pvpMeleeLastAttack = 0
+    local function pvpMeleeUpdate()
+        if not pvpMeleeEnabled then return end
+        
+        local char = LocalPlayer.Character
+        if not char then return end
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        if not humanoid or humanoid.Health <= 0 then return end
+        
+        -- Delay check
+        if tick() - pvpMeleeLastAttack < PVP_DELAY then return end
+        pvpMeleeLastAttack = tick()
+        
+        local targets = getNearbyEnemyPlayers(PVP_RANGE, PVP_MULTI_TARGET)
+        for _, targetPlayer in ipairs(targets) do
+            attackPlayerMelee(targetPlayer)
+        end
+    end
+    
+    local PVPMeleeToggle = PVPSection:Toggle({
+        Title = "PVP Kill Aura",
+        Flag = "PVP_MeleeKillAura",
+        Desc = "Automatically attacks nearby enemy players with melee",
+        Default = false,
+        Callback = function(state)
+            pvpMeleeEnabled = state
+            if state then
+                if pvpMeleeConn then pvpMeleeConn:Disconnect() end
+                pvpMeleeConn = RunService.Heartbeat:Connect(pvpMeleeUpdate)
+                WindUI:Notify({
+                    Title = "PVP Kill Aura",
+                    Content = "Enabled PVP Kill Aura.",
+                    Duration = 3,
+                    Icon = "swords"
+                })
+            else
+                if pvpMeleeConn then
+                    pvpMeleeConn:Disconnect()
+                    pvpMeleeConn = nil
+                end
+            end
+        end
+    })
+    _G.KatchiToggleElements.PVPMelee = PVPMeleeToggle
+    
+    -- PVP Kill Aura (Bayonet)
+    local pvpBayonetEnabled = false
+    local pvpBayonetConn = nil
+    
+    local function getMusket()
+        local char = LocalPlayer.Character
+        if not char then return nil end
+        
+        for _, tool in ipairs(char:GetChildren()) do
+            if tool:IsA("Tool") and tool.Name == "Musket" then
+                return tool
+            end
+        end
+        
+        for _, tool in ipairs(LocalPlayer.Backpack:GetChildren()) do
+            if tool:IsA("Tool") and tool.Name == "Musket" then
+                return tool
+            end
+        end
+        
+        return nil
+    end
+    
+    local function attackPlayerBayonet(targetPlayer)
+        if not targetPlayer or not targetPlayer.Character then return end
+        if isSameTeam(targetPlayer) then return end
+        
+        local weapon = getMusket()
+        if not weapon then return end
+        
+        local char = LocalPlayer.Character
+        if not char then return end
+        
+        if weapon.Parent ~= char then
+            weapon.Parent = char
+            task.wait(0.1)
+        end
+        
+        local remoteEvent = weapon:FindFirstChild("RemoteEvent")
+        if not remoteEvent then return end
+        
+        pcall(function()
+            remoteEvent:FireServer("ThrustBayonet")
+            local head = targetPlayer.Character:FindFirstChild("Head")
+            if head then
+                remoteEvent:FireServer("Bayonet_HitPlayer", targetPlayer.Character:FindFirstChild("Humanoid"), head.Position)
+            end
+        end)
+    end
+    
+    local pvpBayonetLastAttack = 0
+    local function pvpBayonetUpdate()
+        if not pvpBayonetEnabled then return end
+        
+        local char = LocalPlayer.Character
+        if not char then return end
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        if not humanoid or humanoid.Health <= 0 then return end
+        
+        -- Delay check
+        if tick() - pvpBayonetLastAttack < PVP_DELAY then return end
+        pvpBayonetLastAttack = tick()
+        
+        local targets = getNearbyEnemyPlayers(PVP_RANGE, PVP_MULTI_TARGET)
+        for _, targetPlayer in ipairs(targets) do
+            attackPlayerBayonet(targetPlayer)
+        end
+    end
+    
+    local PVPBayonetToggle = PVPSection:Toggle({
+        Title = "PVP Kill Aura Bayonet",
+        Flag = "PVP_BayonetKillAura",
+        Desc = "Automatically attacks nearby enemy players with bayonet",
+        Default = false,
+        Callback = function(state)
+            pvpBayonetEnabled = state
+            if state then
+                if pvpBayonetConn then pvpBayonetConn:Disconnect() end
+                pvpBayonetConn = RunService.Heartbeat:Connect(pvpBayonetUpdate)
+                WindUI:Notify({
+                    Title = "PVP Kill Aura Bayonet",
+                    Content = "Enabled PVP Kill Aura Bayonet.",
+                    Duration = 3,
+                    Icon = "swords"
+                })
+            else
+                if pvpBayonetConn then
+                    pvpBayonetConn:Disconnect()
+                    pvpBayonetConn = nil
+                end
+            end
+        end
+    })
+    _G.KatchiToggleElements.PVPBayonet = PVPBayonetToggle
+    
+    -- Shared PVP Settings Sliders
+    PVPSection:Slider({
+        Title = "PVP Range",
+        Desc = "Attack range for both Melee and Bayonet Kill Aura",
+        Flag = "PVP_Range",
+        Step = 1,
+        Value = { Min = 5, Max = 30, Default = PVP_RANGE },
+        Callback = function(value)
+            PVP_RANGE = value
+        end
+    })
+    
+    PVPSection:Slider({
+        Title = "PVP Delay",
+        Desc = "Delay between attacks",
+        Flag = "PVP_Delay",
+        Step = 0.01,
+        Value = { Min = 0.01, Max = 0.5, Default = PVP_DELAY },
+        Callback = function(value)
+            PVP_DELAY = value
+        end
+    })
+    
+    PVPSection:Slider({
+        Title = "PVP Multi-Target",
+        Desc = "Number of players to attack per swing",
+        Flag = "PVP_MultiTarget",
+        Step = 1,
+        Value = { Min = 1, Max = 10, Default = PVP_MULTI_TARGET },
+        Callback = function(value)
+            PVP_MULTI_TARGET = value
+        end
+    })
+    
+    -- God Mode Teleport Section
+    local GodModeSection = PVPTab:Section({
+        Title = "Teleport Combat",
+        Icon = "zap",
+        Opened = false
+    })
+    
+    local godTeleportEnabled = false
+    local godTeleportConn = nil
+    local currentGodTarget = nil
+    local lastTargetSwitch = 0
+    local floatOffset = 0
+    
+    local GOD_SAFE_DISTANCE = 3
+    local GOD_FLOAT_HEIGHT = 3
+    local GOD_FLOAT_SPEED = 15
+    local GOD_COOLDOWN = 0.6
+    
+    local function getValidPVPTargets()
+        local targets = {}
+        
+        for _, targetPlayer in ipairs(Players:GetPlayers()) do
+            if targetPlayer ~= LocalPlayer and 
+               targetPlayer.Character and
+               targetPlayer.Character:FindFirstChild("HumanoidRootPart") and
+               (not LocalPlayer.Team or not targetPlayer.Team or targetPlayer.Team ~= LocalPlayer.Team) then
+                table.insert(targets, targetPlayer)
+            end
+        end
+        
+        return targets
+    end
+    
+    local function godTeleport()
+        local char = LocalPlayer.Character
+        if not char then return end
+        local myRoot = char:FindFirstChild("HumanoidRootPart")
+        if not myRoot then return end
+        
+        local targets = getValidPVPTargets()
+        if #targets == 0 then
+            return
+        end
+        
+        if tick() - lastTargetSwitch >= GOD_COOLDOWN then
+            currentGodTarget = targets[math.random(1, #targets)]
+            lastTargetSwitch = tick()
+            floatOffset = 0
+        end
+        
+        if currentGodTarget and currentGodTarget.Character then
+            local targetRoot = currentGodTarget.Character:FindFirstChild("HumanoidRootPart")
+            if targetRoot then
+                floatOffset = math.sin(tick() * GOD_FLOAT_SPEED) * GOD_FLOAT_HEIGHT
+                
+                local backVector = targetRoot.CFrame.LookVector * -GOD_SAFE_DISTANCE
+                local floatVector = Vector3.new(0, floatOffset, 0)
+                myRoot.CFrame = CFrame.new(
+                    targetRoot.Position + backVector + floatVector,
+                    targetRoot.Position + floatVector
+                )
+            end
+        end
+    end
+    
+    local GodTeleportToggle = GodModeSection:Toggle({
+        Title = "Orbit Teleport",
+        Flag = "PVP_GodTeleport",
+        Desc = "Orbits random enemy players and floats around them",
+        Default = false,
+        Callback = function(state)
+            godTeleportEnabled = state
+            if state then
+                currentGodTarget = nil
+                lastTargetSwitch = 0
+                if godTeleportConn then godTeleportConn:Disconnect() end
+                godTeleportConn = RunService.Heartbeat:Connect(function()
+                    if godTeleportEnabled then
+                        godTeleport()
+                    end
+                end)
+                WindUI:Notify({
+                    Title = "Orbit Teleport",
+                    Content = "Enabled - Orbiting around enemies.",
+                    Duration = 3,
+                    Icon = "zap"
+                })
+            else
+                if godTeleportConn then
+                    godTeleportConn:Disconnect()
+                    godTeleportConn = nil
+                end
+                currentGodTarget = nil
+            end
+        end
+    })
+    _G.KatchiToggleElements.GodTeleport = GodTeleportToggle
+    
+    -- Character respawn cleanup - PVP Kill Auras use Heartbeat connections, no cleanup needed
+    -- They automatically handle dead/missing characters gracefully
+    
+    -- ===== END PVP FEATURES =====
+end
+
+task.wait(0.1) -- Delay to prevent lag
 do -- // Keybinds and UI Tab
     local KeybindsTab = Others1Section:Tab({ Title = "Keybinds and UI", Icon = "keyboard" })
 
@@ -19583,7 +20280,7 @@ task.wait(0.1) -- Delay to prevent lag
 do -- // Final task.spawn and connects
         WindUI:Notify({
             Title = "Katchi Hub Loaded",
-            Content = "Successfully loaded Katchi Hub 4.5\nUse RightShift key to toggle the menu",
+            Content = "Successfully loaded Katchi Hub 4.6\nUse RightShift key to toggle the menu",
             Duration = 5,
             Icon = "zap",
         })
@@ -19601,6 +20298,14 @@ do -- // Changelog Popup UI
     -- Changelog entries (each entry is a version with its changes)
     -- Format: { version = "vX.X.X", date = "Date", changes = { {type = "fix/feature/update", text = "Description"}, ... } }
     local CHANGELOG_ENTRIES = {
+                                                                         {
+            version = "v4.6",
+            date = "January 2026",
+            changes = {
+                {type = "feature", text = "Added PVP Feature!"},
+                {type = "feature", text = "Added Streamer Mode!"},
+            }
+        },
                                                                  {
             version = "v4.5",
             date = "January 2026",
