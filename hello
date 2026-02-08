@@ -570,6 +570,7 @@ _G.ESPProtectedInstances = ESPProtectedInstances
 
 local kickBlocked = 0
 local banBlocked = 0
+_G.AntiBreakLegsEnabled = _G.AntiBreakLegsEnabled or false -- shared with UI toggle
 
 -- Block Player:Kick()
 local oldKick = nil
@@ -671,6 +672,12 @@ if hookmetamethod and checkcaller and getnamecallmethod then
                 local remoteName = ""
                 pcall(function() remoteName = self.Name end)
                 namecallInHook = false
+
+                -- Block fall/broken-legs self-damage when enabled
+                if _G.AntiBreakLegsEnabled and remoteName == "ForceSelfDamage" then
+                    if ANTIBAN_DEBUG then warn("[ANTI-BAN] Blocked ForceSelfDamage while Anti Break Legs enabled") end
+                    return nil
+                end
                 
                 -- Block known anti-cheat/admin log remotes (blocks OUTGOING too)
                 if blockedRemotes[remoteName] then
@@ -1903,7 +1910,7 @@ local Window = WindUI:CreateWindow({
 
     Window:SetIconSize(48)
     Window:Tag({
-        Title = "v4.6",
+        Title = "v4.7",
         Color = Color3.fromHex("#d9ff00") -- deep crimson
     })
     Window:Tag({
@@ -1935,13 +1942,13 @@ local Window = WindUI:CreateWindow({
     })
 
     InfoSection:Paragraph({
-        Title = "Katchi Hub v4.6",
+        Title = "Katchi Hub v4.7",
         Desc = "Professional Guts & BlackPowder Script Hub\nMade by Yuki\nExecutor: "..(identifyexecutor and identifyexecutor() or "Unknown"),
     })
 
     InfoSection:Paragraph({
         Title = "Changelogs",
-        Desc = "Features\n- Added PVP feature!\n- Added Streamer Mode!",
+        Desc = "Features\n- Added Anti Break Legs!\n\nFixes\n- Fixed Minor Bugs.",
     })
 
 -- Make sure this exists somewhere near the top of your script
@@ -3008,6 +3015,16 @@ local ShoveHitboxToggle = ShoveHitboxSection:Toggle({
     Default = false,
     Callback = function(v)
         ShoveHitboxExpanderEnabled = v
+        -- Disconnect animation watcher when disabled to prevent any shove firing
+        if not v and ShoveHitboxAnimConnection then
+            pcall(function() ShoveHitboxAnimConnection:Disconnect() end)
+            ShoveHitboxAnimConnection = nil
+        elseif v then
+            -- Re-attach animation watcher when enabled
+            if _G.AttachShoveHitboxWatcher then
+                pcall(_G.AttachShoveHitboxWatcher)
+            end
+        end
         WindUI:Notify({
             Title = "Shove Hitbox Expander",
             Content = v and ("Shove Hitbox Expander Enabled") or "Shove Hitbox Expander Disabled",
@@ -3981,28 +3998,41 @@ local function getAimPosition(part, opts)
     return getPredictedAimPosition(part) or part.Position
 end
 -- Helper: resolve zombie type from real zombie models in workspace.Zombies.Agent or workspace.Zombies.Slim
+-- PERFORMANCE: Cache zombie type lookups (weak keys so destroyed zombies get GC'd)
+local ZombieTypeCache = setmetatable({}, { __mode = "k" })
+
 local function GetZombieTypeFromModel(model)
     if not model or not model:IsA("Model") then return nil end
+    
+    -- PERFORMANCE: Return cached type if available
+    local cached = ZombieTypeCache[model]
+    if cached then return cached end
+    
     local parent = model.Parent
     
     -- Cuirassier: any model under Zombies.Slim
     if parent and parent.Name == "Slim" and parent.Parent and parent.Parent.Name == "Zombies" then
+        ZombieTypeCache[model] = "Cuirassier"
         return "Cuirassier"
     end
     
     -- Agent types: check Agent folder inside the zombie model for Type
-    -- Structure: workspace.Zombies.Agent.Zombie.Agent.Type (StringValue)
     local agent = model:FindFirstChild("Agent")
     if agent then
         local typeValue = agent:FindFirstChild("Type")
         if typeValue and typeValue:IsA("StringValue") then
             local t = string.lower(typeValue.Value or "")
-            if t == "normal" then return "Shambler" end
-            if t == "barrel" then return "Bomber" end
-            if t == "fast" then return "Runner" end
-            if t == "sapper" then return "Zapper" end
-            if t == "igniter" then return "Igniter" end
-            if t == "cuirassier" then return "Cuirassier" end
+            local result = nil
+            if t == "normal" then result = "Shambler"
+            elseif t == "barrel" then result = "Bomber"
+            elseif t == "fast" then result = "Runner"
+            elseif t == "sapper" then result = "Zapper"
+            elseif t == "igniter" then result = "Igniter"
+            elseif t == "cuirassier" then result = "Cuirassier" end
+            if result then
+                ZombieTypeCache[model] = result
+                return result
+            end
         end
     end
     
@@ -4011,24 +4041,31 @@ local function GetZombieTypeFromModel(model)
         local t = model:GetAttribute("Type")
         if type(t) == "string" then
             local lower = string.lower(t)
-            if lower == "normal" then return "Shambler" end
-            if lower == "barrel" then return "Bomber" end
-            if lower == "fast" then return "Runner" end
-            if lower == "sapper" then return "Zapper" end
-            if lower == "igniter" then return "Igniter" end
-            if lower == "cuirassier" then return "Cuirassier" end
+            local result = nil
+            if lower == "normal" then result = "Shambler"
+            elseif lower == "barrel" then result = "Bomber"
+            elseif lower == "fast" then result = "Runner"
+            elseif lower == "sapper" then result = "Zapper"
+            elseif lower == "igniter" then result = "Igniter"
+            elseif lower == "cuirassier" then result = "Cuirassier" end
+            if result then
+                ZombieTypeCache[model] = result
+                return result
+            end
         end
     end
     
-    -- Fallback heuristics for detection
-    if model:FindFirstChild("Barrel", true) then return "Bomber" end
-    if model:FindFirstChild("Whale Oil Lantern", true) then return "Igniter" end
-    if model:FindFirstChild("Sword", true) then return "Cuirassier" end
-    if model:FindFirstChild("Axe", true) and model:FindFirstChild("Head", true) then return "Zapper" end
-    if model:FindFirstChild("Eye", true) and not model:FindFirstChild("Axe", true) then return "Runner" end
+    -- Fallback heuristics for detection (only runs once per zombie, result is cached)
+    local result = "Shambler" -- default
+    if model:FindFirstChild("Barrel", true) then result = "Bomber"
+    elseif model:FindFirstChild("Whale Oil Lantern", true) then result = "Igniter"
+    elseif model:FindFirstChild("Sword", true) then result = "Cuirassier"
+    elseif model:FindFirstChild("Axe", true) and model:FindFirstChild("Head", true) then result = "Zapper"
+    elseif model:FindFirstChild("Eye", true) and not model:FindFirstChild("Axe", true) then result = "Runner"
+    end
     
-    -- Default for unknown
-    return "Shambler"
+    ZombieTypeCache[model] = result
+    return result
 end
 -- Helper: check if model matches a given typeName
 local function isZombieOfType(model, typeName)
@@ -5668,7 +5705,7 @@ end
 setupCharacterMonitoring()
 startMainLoop()
 
--- ===== SILENT AIM HOOKS =====
+-- ===== SILENT AIM HOOKS (ZOMBIE) =====
 -- Silent Aim redirects user-initiated shots to the current target instead of auto-shooting
 -- This hooks into the game's raycast and mouse systems to redirect bullets
 
@@ -5725,7 +5762,6 @@ local function startSilentAimLoop()
                     local skipBomber = false
                     if zombieType == "Bomber" then
                         if SILENT_AIM_BOMBER_NEAR_ENABLED then
-                            -- Only target bombers near teammates when this is enabled
                             if not isBomberNearTeammate(sModel, BOMBER_SAFE_RADIUS) then
                                 skipBomber = true
                             end
@@ -5793,6 +5829,7 @@ local function startSilentAimLoop()
 end
 startSilentAimLoop()
 
+-- ===== SILENT AIM HOOKS =====
 -- Hook into game's raycast system for silent aim redirection
 local silentAimOldNamecall = nil
 local silentAimOldIndex = nil
@@ -5835,10 +5872,11 @@ local function setupSilentAimHooks()
                 return silentAimOldNamecall(self, ...)
             end
             
-            -- Determine which target to use (auto shoot takes priority when active)
+            -- Determine which target to use
+            -- Priority: autoShoot > zombie silent aim
             local targetToUse = nil
+            
             if autoShootActive and autoShootCurrentTarget then
-                -- Check Parent without triggering hooks
                 inNamecallHook = true
                 local hasParent = autoShootCurrentTarget.Parent ~= nil
                 inNamecallHook = false
@@ -5846,19 +5884,24 @@ local function setupSilentAimHooks()
                     targetToUse = autoShootCurrentTarget
                 end
             elseif (SILENT_AIM_ENABLED or SILENT_AIM_SAVE_PLAYERS_ENABLED or SILENT_AIM_BOMBER_NEAR_ENABLED) and silentAimCurrentTarget then
-                targetToUse = silentAimCurrentTarget
+                inNamecallHook = true
+                local hasParent = silentAimCurrentTarget.Parent ~= nil
+                inNamecallHook = false
+                if hasParent then
+                    targetToUse = silentAimCurrentTarget
+                end
             end
             
             if targetToUse then
                 inNamecallHook = true
                 local origin = args[1]
-                -- Get position directly without calling getAimPosition to avoid recursion
                 local aimPos = targetToUse.Position
                 inNamecallHook = false
                 
                 local dir = (aimPos - origin)
                 -- Redirect the ray towards the target with slight range compensation
                 args[2] = dir.Unit * (dir.Magnitude + 10)
+                
                 return silentAimOldNamecall(self, unpack(args))
             end
             return silentAimOldNamecall(self, ...)
@@ -5883,8 +5926,10 @@ local function setupSilentAimHooks()
                 return silentAimOldIndex(self, index)
             end
             
-            -- Determine which target to use (auto shoot takes priority when active)
+            -- Determine which target to use
+            -- Priority: autoShoot > zombie silent aim
             local targetToUse = nil
+            
             if autoShootActive and autoShootCurrentTarget then
                 inIndexHook = true
                 local hasParent = autoShootCurrentTarget.Parent ~= nil
@@ -5893,12 +5938,16 @@ local function setupSilentAimHooks()
                     targetToUse = autoShootCurrentTarget
                 end
             elseif (SILENT_AIM_ENABLED or SILENT_AIM_SAVE_PLAYERS_ENABLED or SILENT_AIM_BOMBER_NEAR_ENABLED) and silentAimCurrentTarget then
-                targetToUse = silentAimCurrentTarget
+                inIndexHook = true
+                local hasParent = silentAimCurrentTarget.Parent ~= nil
+                inIndexHook = false
+                if hasParent then
+                    targetToUse = silentAimCurrentTarget
+                end
             end
             
             if targetToUse then
                 inIndexHook = true
-                -- Get position/CFrame directly without calling getAimPosition
                 local aimPos = targetToUse.Position
                 local aimCFrame = targetToUse.CFrame
                 inIndexHook = false
@@ -8937,7 +8986,6 @@ local function KillAura_performKillAura(hrp)
     end
 
     local attackCount = math.min(maxTargets, targetCount)
-    local firstTarget = targets[1]
     
     -- Batch attack all targets (no delay between)
     for i = 1, attackCount do
@@ -8946,8 +8994,6 @@ local function KillAura_performKillAura(hrp)
             KillAura_performFastAttack(meleeTool, primaryRemote, entry, isBayonet, hrpPos)
         end
     end
-
-    -- Auto-look is now handled separately in KillAura_performAutoLook
 end
 
 -- Separate Auto Look function that finds the nearest zombie independently
@@ -10053,199 +10099,208 @@ do -- // Sapper Section in Classes Tab
     local AutoRepairEnabled = false
     local AutoRepairConn = nil
     local AutoRepairRange = 25 -- Range to search for buildable structures
-    local AutoRepairCooldown = 0.15 -- Throttle interval
+    local AutoRepairCooldown = 0.5 -- OPTIMIZED: 0.5s instead of 0.15s (repairs happen server-side, no need for spam)
     
-    -- Helper: Find hammer remote from workspace.Players, backpack, or character
-    -- The game stores remotes in workspace.Players.<PlayerName>.<ToolName>.RemoteEvent
+    -- OPTIMIZED: Cache hammer remote and folder references
+    local cachedHammerRemote = nil
+    local cachedHammerRemoteTime = 0
+    local HAMMER_CACHE_TTL = 2 -- Re-check hammer every 2 seconds
+    
+    -- OPTIMIZED: Cache buildable folder references (they don't change during gameplay)
+    local cachedBuildableFolders = nil
+    local cachedBuildableFoldersTime = 0
+    local FOLDER_CACHE_TTL = 10 -- Re-check folders every 10 seconds
+    
+    -- Helper: Find hammer remote (cached)
     local function getHammerRemote()
+        local now = tick()
+        if cachedHammerRemote and (now - cachedHammerRemoteTime) < HAMMER_CACHE_TTL then
+            -- Validate cached remote still exists
+            if cachedHammerRemote.Parent then return cachedHammerRemote end
+            cachedHammerRemote = nil
+        end
+        
         local char = LocalPlayer.Character
         if not char then return nil end
         
-        -- Method 1: Check workspace.Players folder (where remotes actually are)
+        -- Method 1: workspace.Players folder (where remotes actually are)
         local wsPlayers = Workspace:FindFirstChild("Players")
         if wsPlayers then
             local playerFolder = wsPlayers:FindFirstChild(LocalPlayer.Name)
             if playerFolder then
-                -- Check for Hammer or Claw Hammer folder
                 local hammerFolder = playerFolder:FindFirstChild("Hammer") 
                     or playerFolder:FindFirstChild("Claw Hammer")
-                if hammerFolder and hammerFolder:FindFirstChild("RemoteEvent") then
-                    return hammerFolder.RemoteEvent
+                if hammerFolder then
+                    local re = hammerFolder:FindFirstChild("RemoteEvent")
+                    if re then
+                        cachedHammerRemote = re
+                        cachedHammerRemoteTime = now
+                        return re
+                    end
                 end
             end
         end
         
-        -- Method 2: Check backpack (tool instance)
+        -- Method 2: backpack
         local backpack = LocalPlayer:FindFirstChild("Backpack")
         if backpack then
             local hammer = backpack:FindFirstChild("Hammer") or backpack:FindFirstChild("Claw Hammer")
-            if hammer and hammer:FindFirstChild("RemoteEvent") then
-                return hammer.RemoteEvent
+            if hammer then
+                local re = hammer:FindFirstChild("RemoteEvent")
+                if re then
+                    cachedHammerRemote = re
+                    cachedHammerRemoteTime = now
+                    return re
+                end
             end
         end
         
-        -- Method 3: Check character (if equipped)
+        -- Method 3: character (equipped)
         local hammer = char:FindFirstChild("Hammer") or char:FindFirstChild("Claw Hammer")
-        if hammer and hammer:FindFirstChild("RemoteEvent") then
-            return hammer.RemoteEvent
+        if hammer then
+            local re = hammer:FindFirstChild("RemoteEvent")
+            if re then
+                cachedHammerRemote = re
+                cachedHammerRemoteTime = now
+                return re
+            end
         end
         
         return nil
     end
     
-    -- Helper: Get all nearby buildable structures (BuildingHealth or ConstructHealth)
+    -- OPTIMIZED: Get buildable folder references (cached)
+    local function getBuildableFolders()
+        local now = tick()
+        if cachedBuildableFolders and (now - cachedBuildableFoldersTime) < FOLDER_CACHE_TTL then
+            return cachedBuildableFolders
+        end
+        
+        local folders = {}
+        local folderNames = {"Buildables", "Stakes", "Barricades", "Structures", "Buildings"}
+        for _, name in ipairs(folderNames) do
+            local folder = Workspace:FindFirstChild(name)
+            if folder then folders[#folders + 1] = folder end
+        end
+        
+        -- Check map-specific folders (Berezina, etc.) - only Modes sub-folders
+        for _, mapFolder in ipairs(Workspace:GetChildren()) do
+            if mapFolder:IsA("Folder") or mapFolder:IsA("Model") then
+                local modes = mapFolder:FindFirstChild("Modes")
+                if modes then folders[#folders + 1] = modes end
+            end
+        end
+        
+        cachedBuildableFolders = folders
+        cachedBuildableFoldersTime = now
+        return folders
+    end
+    
+    -- OPTIMIZED: Inline health check to avoid function call overhead per instance
+    -- Uses GetChildren on first level, then checks health values directly
     local function getNearbyBuildables()
         local char = LocalPlayer.Character
         if not char then return {} end
         local root = char:FindFirstChild("HumanoidRootPart")
         if not root then return {} end
         local rootPos = root.Position
+        local rangeSq = AutoRepairRange * AutoRepairRange
         
         local buildables = {}
-        local rangeSq = AutoRepairRange * AutoRepairRange
-        local addedHealthObjects = {} -- Track what we've already added to avoid duplicates
+        local buildCount = 0
+        local seen = {} -- Dedup by health object
+        local MAX_REPAIRS_PER_CYCLE = 10 -- Cap repairs per cycle to avoid remote spam
         
-        -- Scan workspace for buildable structures
-        -- Check common locations: Stakes, Barricades, Buildings, etc.
-        local function checkInstance(inst)
-            if not inst then return end
-            
-            -- Check for BuildingHealth (barricades, stakes, structures)
-            local buildHealth = inst:FindFirstChild("BuildingHealth")
-            if buildHealth and not addedHealthObjects[buildHealth] then
+        local folders = getBuildableFolders()
+        
+        for _, folder in ipairs(folders) do
+            -- OPTIMIZED: Use GetChildren (1 level) instead of GetDescendants (recursive)
+            -- Most buildable structures are direct children of these folders
+            for _, inst in ipairs(folder:GetChildren()) do
+                if buildCount >= MAX_REPAIRS_PER_CYCLE then break end
+                
+                -- Get position for distance check first (early exit if too far)
                 local pos = nil
                 if inst:IsA("BasePart") then
                     pos = inst.Position
                 elseif inst:IsA("Model") then
-                    local primary = inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart")
+                    local primary = inst.PrimaryPart
+                    if not primary then primary = inst:FindFirstChild("HumanoidRootPart") or inst:FindFirstChildWhichIsA("BasePart") end
                     if primary then pos = primary.Position end
                 end
                 
                 if pos then
-                    local distSq = (pos - rootPos).Magnitude ^ 2
+                    local dx, dy, dz = pos.X - rootPos.X, pos.Y - rootPos.Y, pos.Z - rootPos.Z
+                    local distSq = dx*dx + dy*dy + dz*dz
                     if distSq <= rangeSq then
-                        -- Check if needs repair (current < max)
-                        local needsRepair = true
-                        pcall(function()
-                            local currentHealth = buildHealth.Value
-                            local maxHealth = buildHealth:GetAttribute("MaxHealth") or buildHealth:GetAttribute("Max") or 100
-                            needsRepair = currentHealth < maxHealth
-                        end)
-                        if needsRepair then
-                            table.insert(buildables, buildHealth)
-                            addedHealthObjects[buildHealth] = true
+                        -- Check health types in priority order
+                        local healthObj = inst:FindFirstChild("BuildingHealth") 
+                            or inst:FindFirstChild("ConstructHealth")
+                        if not healthObj then
+                            local h = inst:FindFirstChild("Health")
+                            if h and h:IsA("NumberValue") then healthObj = h end
+                        end
+                        
+                        if healthObj and not seen[healthObj] then
+                            -- Quick repair check without pcall for speed
+                            local needsRepair = true
+                            local ok, _ = pcall(function()
+                                local cur = healthObj.Value
+                                local mx = healthObj:GetAttribute("MaxHealth") or healthObj:GetAttribute("Max") or 100
+                                needsRepair = cur < mx
+                            end)
+                            if (not ok) or needsRepair then
+                                seen[healthObj] = true
+                                buildCount = buildCount + 1
+                                buildables[buildCount] = healthObj
+                            end
+                        end
+                    end
+                end
+                
+                -- OPTIMIZED: Also check direct children of models (1 level deeper)
+                if inst:IsA("Model") or inst:IsA("Folder") then
+                    for _, sub in ipairs(inst:GetChildren()) do
+                        if buildCount >= MAX_REPAIRS_PER_CYCLE then break end
+                        
+                        local subPos = nil
+                        if sub:IsA("BasePart") then
+                            subPos = sub.Position
+                        elseif sub:IsA("Model") then
+                            local p = sub.PrimaryPart or sub:FindFirstChildWhichIsA("BasePart")
+                            if p then subPos = p.Position end
+                        end
+                        
+                        if subPos then
+                            local dx2, dy2, dz2 = subPos.X - rootPos.X, subPos.Y - rootPos.Y, subPos.Z - rootPos.Z
+                            local distSq2 = dx2*dx2 + dy2*dy2 + dz2*dz2
+                            if distSq2 <= rangeSq then
+                                local healthObj2 = sub:FindFirstChild("BuildingHealth")
+                                    or sub:FindFirstChild("ConstructHealth")
+                                if not healthObj2 then
+                                    local h2 = sub:FindFirstChild("Health")
+                                    if h2 and h2:IsA("NumberValue") then healthObj2 = h2 end
+                                end
+                                
+                                if healthObj2 and not seen[healthObj2] then
+                                    local needsRepair2 = true
+                                    local ok2, _ = pcall(function()
+                                        local cur2 = healthObj2.Value
+                                        local mx2 = healthObj2:GetAttribute("MaxHealth") or healthObj2:GetAttribute("Max") or 100
+                                        needsRepair2 = cur2 < mx2
+                                    end)
+                                    if (not ok2) or needsRepair2 then
+                                        seen[healthObj2] = true
+                                        buildCount = buildCount + 1
+                                        buildables[buildCount] = healthObj2
+                                    end
+                                end
+                            end
                         end
                     end
                 end
             end
-            
-            -- Check for ConstructHealth (bridge parts, etc.)
-            local constructHealth = inst:FindFirstChild("ConstructHealth")
-            if constructHealth and not addedHealthObjects[constructHealth] then
-                local pos = nil
-                if inst:IsA("BasePart") then
-                    pos = inst.Position
-                elseif inst:IsA("Model") then
-                    local primary = inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart")
-                    if primary then pos = primary.Position end
-                end
-                
-                if pos then
-                    local distSq = (pos - rootPos).Magnitude ^ 2
-                    if distSq <= rangeSq then
-                        table.insert(buildables, constructHealth)
-                        addedHealthObjects[constructHealth] = true
-                    end
-                end
-            end
-            
-            -- Check for Health (some structures use just "Health")
-            local health = inst:FindFirstChild("Health")
-            if health and health:IsA("NumberValue") and not addedHealthObjects[health] then
-                local pos = nil
-                if inst:IsA("BasePart") then
-                    pos = inst.Position
-                elseif inst:IsA("Model") then
-                    local primary = inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart")
-                    if primary then pos = primary.Position end
-                end
-                
-                if pos then
-                    local distSq = (pos - rootPos).Magnitude ^ 2
-                    if distSq <= rangeSq then
-                        -- Check if needs repair
-                        local needsRepair = true
-                        pcall(function()
-                            local currentHealth = health.Value
-                            local maxHealth = health:GetAttribute("MaxHealth") or health:GetAttribute("Max") or 100
-                            needsRepair = currentHealth < maxHealth
-                        end)
-                        if needsRepair then
-                            table.insert(buildables, health)
-                            addedHealthObjects[health] = true
-                        end
-                    end
-                end
-            end
-        end
-        
-        -- Search in common buildable containers
-        local buildablesFolder = Workspace:FindFirstChild("Buildables")
-        if buildablesFolder then
-            for _, child in pairs(buildablesFolder:GetDescendants()) do
-                checkInstance(child)
-            end
-        end
-        
-        -- Search in Stakes folder
-        local stakesFolder = Workspace:FindFirstChild("Stakes")
-        if stakesFolder then
-            for _, child in pairs(stakesFolder:GetDescendants()) do
-                checkInstance(child)
-            end
-        end
-        
-        -- Search in Barricades folder
-        local barricadesFolder = Workspace:FindFirstChild("Barricades")
-        if barricadesFolder then
-            for _, child in pairs(barricadesFolder:GetDescendants()) do
-                checkInstance(child)
-            end
-        end
-        
-        -- Search in Structures folder
-        local structuresFolder = Workspace:FindFirstChild("Structures")
-        if structuresFolder then
-            for _, child in pairs(structuresFolder:GetDescendants()) do
-                checkInstance(child)
-            end
-        end
-        
-        -- Search in Buildings folder
-        local buildingsFolder = Workspace:FindFirstChild("Buildings")
-        if buildingsFolder then
-            for _, child in pairs(buildingsFolder:GetDescendants()) do
-                checkInstance(child)
-            end
-        end
-        
-        -- Search in map-specific folders (Berezina, etc.)
-        for _, mapFolder in pairs(Workspace:GetChildren()) do
-            if mapFolder:IsA("Folder") or mapFolder:IsA("Model") then
-                local modes = mapFolder:FindFirstChild("Modes")
-                if modes then
-                    for _, modeChild in pairs(modes:GetDescendants()) do
-                        checkInstance(modeChild)
-                    end
-                end
-            end
-        end
-        
-        -- Also search root workspace for loose buildables
-        for _, child in pairs(Workspace:GetChildren()) do
-            if child:IsA("Model") then
-                checkInstance(child)
-            end
+            if buildCount >= MAX_REPAIRS_PER_CYCLE then break end
         end
         
         return buildables
@@ -10957,13 +11012,16 @@ local function OnShoveAnimationPlayed(track)
     end
 end
 
--- Attach animation watcher to humanoid
-local function AttachShoveHitboxWatcher()
+-- Attach animation watcher to humanoid (global so toggle can call it)
+_G.AttachShoveHitboxWatcher = function()
     -- Disconnect previous connection if exists
     if ShoveHitboxAnimConnection then
         pcall(function() ShoveHitboxAnimConnection:Disconnect() end)
         ShoveHitboxAnimConnection = nil
     end
+    
+    -- Only attach watcher if feature is enabled
+    if not ShoveHitboxExpanderEnabled then return end
     
     local char = LocalPlayer.Character
     if not char then return end
@@ -10979,16 +11037,22 @@ local function AttachShoveHitboxWatcher()
     end
 end
 
--- Attach on character spawn
+local AttachShoveHitboxWatcher = _G.AttachShoveHitboxWatcher
+
+-- Attach on character spawn (only if feature is enabled)
 LocalPlayer.CharacterAdded:Connect(function(newChar)
     task.wait(0.2)
-    AttachShoveHitboxWatcher()
+    if ShoveHitboxExpanderEnabled then
+        AttachShoveHitboxWatcher()
+    end
 end)
 
--- Initial attach if character already loaded
+-- Initial attach if character already loaded (only if feature is enabled)
 task.spawn(function()
     task.wait(0.5)
-    AttachShoveHitboxWatcher()
+    if ShoveHitboxExpanderEnabled then
+        AttachShoveHitboxWatcher()
+    end
 end)
 
 -- Auto Parry Zapper: spam BraceBlock when a zapper is close (uses ESP detection)
@@ -12369,6 +12433,11 @@ do -- // Players Tab
         local localRoot = localChar and localChar:FindFirstChild("HumanoidRootPart")
         local camera = Workspace.CurrentCamera
         if not camera then return end
+        
+        -- PERFORMANCE: Cache workspace.Players reference once per update cycle
+        local wPlayers = Workspace:FindFirstChild("Players")
+        -- PERFORMANCE: Compute tick() once for pulse animations
+        local now = tick()
 
         for _, player in ipairs(Players:GetPlayers()) do
             if player ~= LocalPlayer then
@@ -12400,15 +12469,21 @@ do -- // Players Tab
 
                 local hum = data.Humanoid
                 if not hum then continue end
-                local health = hum.Health
-                local max = hum.MaxHealth > 0 and hum.MaxHealth or 1
-                local percent = math.clamp(health / max, 0, 1)
+                -- pcall safety: Humanoid may be destroyed between checks
+                local okH, health, max, percent
+                okH, health, max = pcall(function()
+                    local h = hum.Health
+                    local m = hum.MaxHealth
+                    return h, m
+                end)
+                if not okH then continue end
+                max = (max and max > 0) and max or 1
+                percent = math.clamp(health / max, 0, 1)
 
                 -- Check grabbed/pinned/infected
                 local grabbed = false
                 local pinned = false
                 local infectionLevel = 0
-                local wPlayers = Workspace:FindFirstChild("Players")
                 if wPlayers then
                     local playerFolder = wPlayers:FindFirstChild(player.Name)
                     if playerFolder then
@@ -12527,7 +12602,7 @@ do -- // Players Tab
                         data.StatusBg.Position = UDim2.new(0.05, 0, 0.30, 0)
                         data.StatusBg.Visible = true
                         -- purple-ish background for mercy
-                        local pulse = math.sin(tick() * 6)
+                        local pulse = math.sin(now * 6)
                         if pulse > 0 then
                             data.StatusBg.BackgroundColor3 = Color3.fromRGB(120, 0, 120)
                         else
@@ -12555,14 +12630,14 @@ do -- // Players Tab
 
                     -- change chams color to purple pulse when mercy
                     if ChamsESPEnabled and data.Highlight then
-                        local pulse = math.sin(tick() * 6)
+                        local pulse = math.sin(now * 6)
                         if pulse > 0 then
                             data.Highlight.FillColor = Color3.fromRGB(180, 0, 180)
                         else
                             data.Highlight.FillColor = Color3.fromRGB(110, 0, 110)
                         end
                         data.Highlight.FillTransparency = math.clamp(
-                            ChamsFillTransparency + 0.2 * math.abs(math.sin(tick() * 8)),
+                            ChamsFillTransparency + 0.2 * math.abs(math.sin(now * 8)),
                             0, 1
                         )
                         data.Highlight.OutlineColor = Color3.fromRGB(255, 200, 255)
@@ -12575,7 +12650,7 @@ do -- // Players Tab
                         data.StatusBg.Position = UDim2.new(0, 0, 0, 0)
                         data.StatusBg.Visible = true
                         -- red pulsing background for grabbed/pinned
-                        local pulse = math.sin(tick() * 10)
+                        local pulse = math.sin(now * 10)
                         if pulse > 0 then
                             data.StatusBg.BackgroundColor3 = Color3.fromRGB(200, 30, 30)
                         else
@@ -12600,10 +12675,10 @@ do -- // Players Tab
 
                     -- Change chams color to flashing red
                     if ChamsESPEnabled and data.Highlight then
-                        local pulse = math.sin(tick() * 10)
+                        local pulse = math.sin(now * 10)
                         data.Highlight.FillColor = pulse > 0 and Color3.fromRGB(255, 0, 0) or Color3.fromRGB(200, 0, 0)
                         data.Highlight.FillTransparency = math.clamp(
-                            ChamsFillTransparency + 0.2 * math.abs(math.sin(tick() * 8)),
+                            ChamsFillTransparency + 0.2 * math.abs(math.sin(now * 8)),
                             0, 1
                         )
                         data.Highlight.OutlineColor = Color3.fromRGB(255, 100, 100)
@@ -12624,11 +12699,28 @@ do -- // Players Tab
 
                     -- Restore normal chams
                     if ChamsESPEnabled and data.Highlight then
-                        local r = math.floor(255 * (1 - percent))
-                        local g = math.floor(255 * percent)
-                        data.Highlight.FillColor = Color3.fromRGB(r, g, 0)
-                        data.Highlight.FillTransparency = ChamsFillTransparency
-                        data.Highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+                        -- Team ESP: use team color if enabled
+                        if _G._PlayerESP_TeamESPEnabled and _G._PlayerESP_getTeamColor then
+                            local tc = _G._PlayerESP_getTeamColor(player)
+                            if tc then
+                                data.Highlight.FillColor = tc
+                                data.Highlight.OutlineColor = tc
+                                data.Highlight.FillTransparency = ChamsFillTransparency
+                            else
+                                -- No team, fall back to health color
+                                local r = math.floor(255 * (1 - percent))
+                                local g = math.floor(255 * percent)
+                                data.Highlight.FillColor = Color3.fromRGB(r, g, 0)
+                                data.Highlight.FillTransparency = ChamsFillTransparency
+                                data.Highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+                            end
+                        else
+                            local r = math.floor(255 * (1 - percent))
+                            local g = math.floor(255 * percent)
+                            data.Highlight.FillColor = Color3.fromRGB(r, g, 0)
+                            data.Highlight.FillTransparency = ChamsFillTransparency
+                            data.Highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+                        end
                     end
                 end  -- ✅ this is the missing one (closes isMercy / elseif / else)
 
@@ -12980,6 +13072,63 @@ do -- // Players Tab
                 Duration = 2,
                 Icon = state and "bell" or "bell-off",
             })
+        end
+    })
+
+    -- Team ESP Toggle
+    local TeamESPEnabled = false
+    local TeamESPColors = {} -- [teamName] = Color3
+    
+    -- Generate consistent colors for teams
+    local function getTeamColor(player)
+        if not player or not player.Team then return nil end
+        local team = player.Team
+        -- Use the team's actual TeamColor (BrickColor) if available
+        local ok, color = pcall(function() return team.TeamColor.Color end)
+        if ok and color then return color end
+        -- Fallback: hash team name to a color
+        local name = team.Name
+        if not TeamESPColors[name] then
+            local hash = 0
+            for i = 1, #name do hash = hash + string.byte(name, i) * (i * 7) end
+            local hue = (hash % 360) / 360
+            TeamESPColors[name] = Color3.fromHSV(hue, 0.8, 1)
+        end
+        return TeamESPColors[name]
+    end
+    
+    -- Make getTeamColor accessible to UpdateESPLoop
+    _G._PlayerESP_TeamESPEnabled = false
+    _G._PlayerESP_getTeamColor = getTeamColor
+    
+    SettingsSection:Toggle({
+        Title = "Team ESP",
+        Flag = "Players_TeamESP",
+        Desc = "Color players by their team. Overrides health-based chams color.",
+        Default = false,
+        Callback = function(state)
+            TeamESPEnabled = state
+            _G._PlayerESP_TeamESPEnabled = state
+            WindUI:Notify({
+                Title = "Team ESP",
+                Content = state and "Team colors ON" or "Team colors OFF",
+                Duration = 2,
+                Icon = state and "users" or "users",
+            })
+            -- Update existing highlights immediately
+            if ChamsESPEnabled then
+                for player, data in pairs(PlayerESPData) do
+                    if data.Highlight and player ~= LocalPlayer then
+                        if state then
+                            local tc = getTeamColor(player)
+                            if tc then
+                                data.Highlight.FillColor = tc
+                                data.Highlight.OutlineColor = tc
+                            end
+                        end
+                    end
+                end
+            end
         end
     })
 
@@ -16952,6 +17101,99 @@ end
     _G.KatchiToggleElements = _G.KatchiToggleElements or {}
     _G.KatchiToggleElements.NoFallDamage = NoFallDamageToggle
 
+    -- === Anti Break Legs ===
+    local antiBreakLegsEnabled = false
+    local antiBreakLegsConn = nil
+    local antiBreakLegsHeartbeatConn = nil
+    local ANTI_BREAK_LEGS_FALL_SPEED = -25 -- Fall speed threshold to activate climbing state
+
+    local function disconnectAntiBreakLegs()
+        if antiBreakLegsConn then
+            pcall(function() antiBreakLegsConn:Disconnect() end)
+            antiBreakLegsConn = nil
+        end
+        if antiBreakLegsHeartbeatConn then
+            pcall(function() antiBreakLegsHeartbeatConn:Disconnect() end)
+            antiBreakLegsHeartbeatConn = nil
+        end
+    end
+
+    local function startAntiBreakLegs()
+        disconnectAntiBreakLegs()
+
+        -- Main loop - clear broken legs and apply climbing state when falling
+        antiBreakLegsConn = RunService.RenderStepped:Connect(function()
+            if not antiBreakLegsEnabled then return end
+
+            local char = LocalPlayer and LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            if not hum or not root then return end
+
+            -- Always clear broken legs state every frame
+            local userStates = LocalPlayer:FindFirstChild("UserStates")
+            if userStates then
+                local brokenLegs = userStates:FindFirstChild("BrokenLegs")
+                if brokenLegs then
+                    brokenLegs.Value = false
+                end
+            end
+
+            -- Check if we're airborne (not touching ground)
+            local floorMaterial = hum.FloorMaterial
+            local isAirborne = floorMaterial == Enum.Material.Air
+
+            -- If falling and airborne, continuously set climbing state
+            local yVel = root.Velocity.Y
+            if isAirborne and yVel < ANTI_BREAK_LEGS_FALL_SPEED then
+                hum:ChangeState(Enum.HumanoidStateType.Climbing)
+            end
+        end)
+
+        -- Secondary heartbeat loop for redundancy (catches state changes between frames)
+        antiBreakLegsHeartbeatConn = RunService.Heartbeat:Connect(function()
+            if not antiBreakLegsEnabled then return end
+
+            local userStates = LocalPlayer:FindFirstChild("UserStates")
+            if userStates then
+                local brokenLegs = userStates:FindFirstChild("BrokenLegs")
+                if brokenLegs and brokenLegs.Value then
+                    brokenLegs.Value = false
+                end
+            end
+        end)
+    end
+
+    local AntiBreakLegsToggle = ServerModifiersSection:Toggle({
+        Title = "Anti Break Legs",
+        Flag = "ServerMods_AntiBreakLegs",
+        Desc = "Prevents broken legs",
+        Default = false,
+        Callback = function(state)
+            antiBreakLegsEnabled = state
+            _G.AntiBreakLegsEnabled = state
+
+            if state then
+                startAntiBreakLegs()
+                WindUI:Notify({
+                    Title = "Server Modifiers",
+                    Content = "Anti Break Legs enabled.",
+                    Duration = 2,
+                    Icon = "activity"
+                })
+            else
+                disconnectAntiBreakLegs()
+                WindUI:Notify({
+                    Title = "Server Modifiers",
+                    Content = "Anti Break Legs disabled.",
+                    Duration = 2,
+                    Icon = "activity"
+                })
+            end
+        end
+    })
+    _G.KatchiToggleElements.AntiBreakLegs = AntiBreakLegsToggle
+
     -- === Baguette Purchase ===
     ServerModifiersSection:Button({
         Title = "Get Baguette",
@@ -17435,7 +17677,11 @@ end
                 })
             else
                 stopFly()
-                -- Lock Noclip toggle and disable it when Fly is disabled
+                -- Force stop noclip directly (don't just set toggle - call the function)
+                if _G.KatchiStopNoclip then
+                    pcall(_G.KatchiStopNoclip)
+                end
+                -- Also update the toggle UI to reflect disabled state
                 if _G.KatchiToggleElements and _G.KatchiToggleElements.NoclipBypass then
                     pcall(function()
                         _G.KatchiToggleElements.NoclipBypass:Set(false)
@@ -17732,7 +17978,13 @@ end
         -- Main loop - monitor wall entry/exit and handle CFrame movement when inside wall
         -- Use RenderStepped for faster detection (runs before frame renders)
         noclipCFlyConn = RunService.RenderStepped:Connect(function(deltaTime)
+            -- SAFETY: Don't run if noclip is disabled OR if fly is disabled
             if not NoclipEnabled then return end
+            if not FlyEnabled then
+                -- Fly was disabled but noclip is still on - force stop noclip
+                stopNoclip()
+                return
+            end
             
             local character = LocalPlayer.Character
             if not character then return end
@@ -17848,9 +18100,16 @@ end
             _G.NoclipLastValidPosition = serverNoclipPosition
         end)
         
-        -- Collision disable loop
+        -- Collision disable loop (with fly check for safety)
         noclipCollisionConn = RunService.Stepped:Connect(function()
+            -- SAFETY: Don't run if noclip is disabled OR if fly is disabled
             if not NoclipEnabled then return end
+            if not FlyEnabled then
+                -- Fly was disabled but noclip is still on - force disable noclip
+                NoclipEnabled = false
+                _G.KatchiNoclipEnabled = false
+                return
+            end
             
             local character = LocalPlayer.Character
             if not character then return end
@@ -17873,7 +18132,10 @@ end
         end)
     end
 
+    -- Make stopNoclip global so fly toggle can call it directly
     local function stopNoclip()
+        NoclipEnabled = false
+        _G.KatchiNoclipEnabled = false
         _G.NoclipBypassEnabled = false
         _G.NoclipLastValidPosition = nil
         
@@ -17905,6 +18167,14 @@ end
             if humanoid then
                 humanoid.PlatformStand = false
             end
+            
+            -- Restore collision on all parts
+            for _, partName in ipairs(NOCLIP_PARTS) do
+                local part = char:FindFirstChild(partName)
+                if part and part:IsA("BasePart") then
+                    pcall(function() part.CanCollide = true end)
+                end
+            end
         end
         
         headWasAnchored = false
@@ -17919,6 +18189,9 @@ end
         lastNoclipPosition = nil
         serverNoclipPosition = nil
     end
+    
+    -- Expose globally so fly toggle can call it
+    _G.KatchiStopNoclip = stopNoclip
 
     -- Re-setup on respawn
     LocalPlayer.CharacterAdded:Connect(function(newChar)
@@ -18815,6 +19088,121 @@ do -- // PVP Tab
         end
     })
     
+    -- ===== PVP WHITELIST SYSTEM =====
+    -- Shared whitelist for all PVP features (Kill Aura, Bayonet, Teleport, Silent Aim)
+    local PVP_Whitelist = {} -- Array of player names to NOT attack
+    local PVP_WhitelistDropdown = nil
+    local isPVPWhitelistRefreshing = false
+    
+    -- Helper: Check if player is whitelisted
+    local function isPVPWhitelisted(playerName)
+        for _, name in ipairs(PVP_Whitelist) do
+            if name == playerName then return true end
+        end
+        return false
+    end
+    
+    -- Helper: Get list of enemy players for dropdown (not same team)
+    local function getPVPWhitelistPlayers()
+        local names = {"None"}
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
+                table.insert(names, player.Name)
+            end
+        end
+        return names
+    end
+    
+    -- Helper: Refresh whitelist dropdown values
+    local function refreshPVPWhitelistDropdown()
+        if isPVPWhitelistRefreshing then return end
+        isPVPWhitelistRefreshing = true
+        pcall(function()
+            if PVP_WhitelistDropdown and PVP_WhitelistDropdown.Refresh then
+                PVP_WhitelistDropdown:Refresh(getPVPWhitelistPlayers())
+            end
+        end)
+        isPVPWhitelistRefreshing = false
+    end
+    
+    -- Listen for player joins/leaves to update dropdown
+    Players.PlayerAdded:Connect(function()
+        task.delay(0.5, refreshPVPWhitelistDropdown)
+    end)
+    Players.PlayerRemoving:Connect(function(player)
+        -- Remove from whitelist if they leave
+        for i, name in ipairs(PVP_Whitelist) do
+            if name == player.Name then
+                table.remove(PVP_Whitelist, i)
+                break
+            end
+        end
+        task.delay(0.1, refreshPVPWhitelistDropdown)
+    end)
+    
+    -- PVP Whitelist Dropdown
+    PVP_WhitelistDropdown = PVPSection:Dropdown({
+        Title = "PVP Whitelist",
+        Flag = "PVP_Whitelist",
+        Desc = "Players who won't be attacked by any PVP feature",
+        Values = getPVPWhitelistPlayers(),
+        Value = {},
+        Multi = true,
+        Callback = function(selection)
+            local filtered = {}
+            local hasNone = false
+            for _, name in ipairs(selection or {}) do
+                if name == "None" then
+                    hasNone = true
+                else
+                    table.insert(filtered, name)
+                end
+            end
+            if hasNone then
+                filtered = {}
+            end
+            PVP_Whitelist = filtered
+        end
+    })
+    
+    -- Update getNearbyEnemyPlayers to respect whitelist
+    local function getNearbyEnemyPlayersFiltered(range, maxTargets)
+        local targets = {}
+        local char = LocalPlayer.Character
+        if not char then return targets end
+        local myRoot = char:FindFirstChild("HumanoidRootPart")
+        if not myRoot then return targets end
+        
+        for _, targetPlayer in ipairs(Players:GetPlayers()) do
+            if targetPlayer ~= LocalPlayer and targetPlayer.Character then
+                -- Skip whitelisted players
+                if isPVPWhitelisted(targetPlayer.Name) then continue end
+                
+                local targetHumanoid = targetPlayer.Character:FindFirstChild("Humanoid")
+                local targetRoot = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+                if targetHumanoid and targetHumanoid.Health > 0 and targetRoot and not isSameTeam(targetPlayer) then
+                    local dist = (targetRoot.Position - myRoot.Position).Magnitude
+                    if dist <= range then
+                        table.insert(targets, {player = targetPlayer, dist = dist})
+                    end
+                end
+            end
+        end
+        
+        -- Sort by distance (closest first)
+        table.sort(targets, function(a, b) return a.dist < b.dist end)
+        
+        -- Return up to maxTargets
+        local result = {}
+        for i = 1, math.min(#targets, maxTargets) do
+            table.insert(result, targets[i].player)
+        end
+        return result
+    end
+    
+    -- Override the original function to use filtered version
+    getNearbyEnemyPlayers = getNearbyEnemyPlayersFiltered
+    
     -- God Mode Teleport Section
     local GodModeSection = PVPTab:Section({
         Title = "Teleport Combat",
@@ -18833,6 +19221,7 @@ do -- // PVP Tab
     local GOD_FLOAT_SPEED = 15
     local GOD_COOLDOWN = 0.6
     
+    -- Updated to respect whitelist
     local function getValidPVPTargets()
         local targets = {}
         
@@ -18840,7 +19229,8 @@ do -- // PVP Tab
             if targetPlayer ~= LocalPlayer and 
                targetPlayer.Character and
                targetPlayer.Character:FindFirstChild("HumanoidRootPart") and
-               (not LocalPlayer.Team or not targetPlayer.Team or targetPlayer.Team ~= LocalPlayer.Team) then
+               (not LocalPlayer.Team or not targetPlayer.Team or targetPlayer.Team ~= LocalPlayer.Team) and
+               not isPVPWhitelisted(targetPlayer.Name) then
                 table.insert(targets, targetPlayer)
             end
         end
@@ -20285,7 +20675,7 @@ do -- // Final task.spawn and connects
             Icon = "zap",
         })
 
-    print("Katchi Hub v4.3 successfully loaded!")
+    print("Katchi Hub v4.7 successfully loaded!")
     print("Made by Yuki")
     print("i like dawgs!")
 end -- end of Final block
@@ -20298,6 +20688,14 @@ do -- // Changelog Popup UI
     -- Changelog entries (each entry is a version with its changes)
     -- Format: { version = "vX.X.X", date = "Date", changes = { {type = "fix/feature/update", text = "Description"}, ... } }
     local CHANGELOG_ENTRIES = {
+                                                                         {
+            version = "v4.7",
+            date = "January 2026",
+            changes = {
+                {type = "feature", text = "Added Anti Break Legs!"},
+                {type = "fix", text = "Fixed Minor Bugs."},
+            }
+        },
                                                                          {
             version = "v4.6",
             date = "January 2026",
